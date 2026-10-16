@@ -1,0 +1,11 @@
+dist
+coverage
+node_modules
+package-lock.json
+
+# Documentos se mantienen a mano
+docs
+*.md
+
+# Copia del contrato del core: no se edita ni se reformatea (npm run contrato:sync)
+contracts
