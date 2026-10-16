@@ -1,0 +1,47 @@
+{
+  "name": "quinde-gateway",
+  "version": "0.1.0",
+  "description": "Quinde · Gateway: la puerta única de la arquitectura de vuelos",
+  "private": true,
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "lint": "eslint .",
+    "start": "node dist/main.js",
+    "start:dev": "tsc -p tsconfig.build.json && node dist/main.js",
+    "prepare": "husky || true",
+    "test": "jest --runInBand",
+    "test:mutaciones": "node scripts/mutaciones.mjs",
+    "prerutas:listar": "npm run build --silent",
+    "rutas:listar": "node dist/cli/listar-rutas.js",
+    "contrato:sync": "node scripts/contrato-sync.cjs",
+    "contrato:check": "node scripts/contrato-check.cjs"
+  },
+  "dependencies": {
+    "fastify": "^5.12.7",
+    "jose": "^6.2.12",
+    "yaml": "^2.9.1"
+  },
+  "devDependencies": {
+    "@commitlint/cli": "^21.2.3",
+    "@commitlint/config-conventional": "^21.2.3",
+    "@eslint/js": "^9.39.5",
+    "@types/jest": "^29.5.14",
+    "@types/node": "^22.20.5",
+    "eslint": "^9.39.5",
+    "eslint-config-prettier": "^10.1.8",
+    "globals": "^17.13.0",
+    "husky": "^9.1.7",
+    "jest": "^29.7.0",
+    "prettier": "^3.9.10",
+    "ts-jest": "^29.4.15",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.71.2"
+  }
+}
