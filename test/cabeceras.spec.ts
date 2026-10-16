@@ -265,7 +265,7 @@ describe('cabeceras', () => {
       );
       expect(respuesta.cabeceras['access-control-max-age']).toBe('600');
       expect(respuesta.cabeceras['access-control-allow-credentials']).toBeUndefined();
-      expect(servicios.totalRecibidas()).toBe(0);
+      expect(servicios.totalIniciadas()).toBe(0);
     });
 
     it('preflight denegado: 204 sin Access-Control-* (el navegador bloquea)', async () => {
@@ -278,7 +278,7 @@ describe('cabeceras', () => {
       expect(
         Object.keys(respuesta.cabeceras).filter((c) => c.startsWith('access-control-')),
       ).toEqual([]);
-      expect(servicios.totalRecibidas()).toBe(0);
+      expect(servicios.totalIniciadas()).toBe(0);
     });
 
     it('un preflight no se salta el bloqueo ni la normalización', async () => {

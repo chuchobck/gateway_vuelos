@@ -108,7 +108,7 @@ describe('rutas', () => {
       });
       expect(respuesta.status).toBe(404);
       expect(respuesta.cabeceras['content-type']).toMatch(/^application\/problem\+json/);
-      expect(servicios.totalRecibidas()).toBe(0);
+      expect(servicios.totalIniciadas()).toBe(0);
     });
 
     const disfrazadas = [
@@ -127,7 +127,7 @@ describe('rutas', () => {
     it.each(disfrazadas)('%s → 400 o 404, nunca un upstream', async (ruta) => {
       const respuesta = await gateway.pedir({ metodo: 'POST', ruta, cuerpo: '{}' });
       expect([400, 404]).toContain(respuesta.status);
-      expect(servicios.totalRecibidas()).toBe(0);
+      expect(servicios.totalIniciadas()).toBe(0);
     });
 
     it('va antes que la tabla: ni una regla que lo cubriera lo deja pasar', async () => {
@@ -147,7 +147,7 @@ describe('rutas', () => {
           const respuesta = await comodin.pedir({ metodo: 'POST', ruta, cuerpo: '{}' });
           expect(respuesta.status).toBe(404);
         }
-        expect(servicios.totalRecibidas()).toBe(0);
+        expect(servicios.totalIniciadas()).toBe(0);
         // La regla comodín sí funciona para lo demás
         expect((await comodin.pedir({ ruta: '/otra/cosa' })).status).toBe(200);
         expect(servicios.upstreams.notifier.recibidas).toHaveLength(1);
@@ -180,7 +180,7 @@ describe('rutas', () => {
         code: 'VALIDATION_FAILED',
       });
       expect(respuesta.cabeceras['x-request-id']).toMatch(/^[0-9a-f-]{36}$/);
-      expect(servicios.totalRecibidas()).toBe(0);
+      expect(servicios.totalIniciadas()).toBe(0);
     });
   });
 
@@ -205,7 +205,7 @@ describe('rutas', () => {
       expect(respuesta.status).toBe(400);
       expect(respuesta.cabeceras['content-type']).toMatch(/^application\/problem\+json/);
       expect(respuesta.cabeceras['x-request-id']).toMatch(/^[0-9a-f-]{36}$/);
-      expect(servicios.totalRecibidas()).toBe(0);
+      expect(servicios.totalIniciadas()).toBe(0);
     });
   });
 

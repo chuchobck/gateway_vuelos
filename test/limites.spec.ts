@@ -1,3 +1,4 @@
+import { request } from 'node:http';
 import { CUERPO_100KB } from '../src/rutas/tabla-rutas';
 import { GatewayDePrueba, Servicios } from './utils/gateway';
 
@@ -139,7 +140,37 @@ describe('límites', () => {
       });
       expect(respuesta.status).toBe(413);
       expect(respuesta.json()).toMatchObject({ status: 413, title: 'Payload Too Large' });
-      expect(servicios.totalRecibidas()).toBe(0);
+      // Ni siquiera empieza a llegarle: se decide con Content-Length, antes de abrir la conexión
+      expect(servicios.totalIniciadas()).toBe(0);
+    });
+
+    it('con Content-Length de 1 MB: 413 enseguida, sin esperar el cuerpo ni abrir el upstream', async () => {
+      const url = new URL(gateway.base);
+      const status = await new Promise<number>((resolver, rechazar) => {
+        const salida = request({
+          hostname: url.hostname,
+          port: url.port,
+          method: 'POST',
+          path: '/flights/v1/search',
+          headers: { 'content-type': 'application/json', 'content-length': 1024 * 1024 },
+          agent: false,
+        });
+        const plazo = setTimeout(() => {
+          salida.destroy();
+          rechazar(new Error('el gateway esperó el cuerpo en lugar de responder 413'));
+        }, 2000);
+        salida.on('response', (respuesta) => {
+          clearTimeout(plazo);
+          respuesta.resume();
+          salida.destroy();
+          resolver(respuesta.statusCode ?? 0);
+        });
+        salida.on('error', () => undefined);
+        // Solo 1 KB de lo declarado: el resto nunca llega
+        salida.write(Buffer.alloc(1024, 'a'));
+      });
+      expect(status).toBe(413);
+      expect(servicios.totalIniciadas()).toBe(0);
     });
 
     it('en trozos (sin Content-Length) sobre 100 kB: 413 y el upstream no lo procesa', async () => {

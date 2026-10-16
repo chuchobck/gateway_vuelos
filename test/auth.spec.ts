@@ -66,7 +66,7 @@ describe('autenticación en el borde', () => {
     if (error) expect(desafio).toContain(`error="${error}"`);
     else expect(desafio).not.toContain('error=');
     expect(respuesta.json().status).toBe(401);
-    expect(servicios.totalRecibidas()).toBe(0);
+    expect(servicios.totalIniciadas()).toBe(0);
   }
 
   describe.each(protegidas.map((o) => [`${o.metodo} ${o.plantilla}`, o] as const))(
@@ -108,8 +108,15 @@ describe('autenticación en el borde', () => {
           iat: ahora,
           exp: ahora + 900,
         });
-        // La clave pública en PEM (y en DER) usada como secreto HMAC: el ataque clásico
-        for (const secreto of [pem, createPublicKey(pem).export({ type: 'spki', format: 'der' })]) {
+        // La clave pública usada como secreto HMAC, el ataque clásico, en cada forma en que un
+        // atacante la encuentra: PEM con y sin salto final (jose, node:crypto) y DER
+        const publica = createPublicKey(pem);
+        const formas = [
+          pem.trimEnd(),
+          `${pem.trimEnd()}\n`,
+          publica.export({ type: 'spki', format: 'der' }),
+        ];
+        for (const secreto of formas) {
           const firma = createHmac('sha256', secreto).update(`${cabecera}.${cuerpo}`).digest();
           await esperar401(
             metodo,
@@ -158,7 +165,7 @@ describe('autenticación en el borde', () => {
           `scope="${requeridos.join(' ')}"`,
         );
         expect(respuesta.json().detail).toBe(`Missing required scopes: ${requeridos.join(' ')}`);
-        expect(servicios.totalRecibidas()).toBe(0);
+        expect(servicios.totalIniciadas()).toBe(0);
       });
 
       it('con el scope justo → pasa con el Authorization intacto', async () => {
@@ -224,7 +231,7 @@ describe('autenticación en el borde', () => {
         cabeceras: { authorization: `Bearer ${persona}` },
       });
       expect(sinAdmin.status).toBe(403);
-      expect(servicios.totalRecibidas()).toBe(0);
+      expect(servicios.totalIniciadas()).toBe(0);
 
       const admin = await gateway.token({ scope: 'flights:admin' });
       const conAdmin = await gateway.pedir({
@@ -241,7 +248,7 @@ describe('autenticación en el borde', () => {
       expect(sinToken.status).toBe(401);
       const otra = await gateway.pedir({ ruta: '/flights/v1/no-existe' });
       expect(otra.status).toBe(401);
-      expect(servicios.totalRecibidas()).toBe(0);
+      expect(servicios.totalIniciadas()).toBe(0);
 
       const token = await gateway.token({ scope: '' });
       const conToken = await gateway.pedir({
@@ -320,7 +327,7 @@ describe('autenticación en el borde', () => {
           cabeceras: { authorization: `Bearer ${token}` },
         });
         expect(webhooks.status).toBe(503);
-        expect(servicios.totalRecibidas()).toBe(0);
+        expect(servicios.totalIniciadas()).toBe(0);
 
         // Sin token sigue siendo 401 (no hace falta el JWKS para saberlo)
         expect((await otro.pedir({ ruta: '/flights/v1/bookings' })).status).toBe(401);

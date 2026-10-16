@@ -35,6 +35,8 @@ const ECO: Manejador = (peticion, respuesta) => {
  */
 export class UpstreamFalso {
   readonly recibidas: PeticionRecibida[] = [];
+  /** Peticiones que empezaron a llegar (con o sin el cuerpo completo). */
+  iniciadas = 0;
   manejador: Manejador = ECO;
   private servidor?: Server;
 
@@ -42,6 +44,7 @@ export class UpstreamFalso {
 
   async iniciar(): Promise<this> {
     this.servidor = createServer((peticion, respuesta) => {
+      this.iniciadas++;
       const trozos: Buffer[] = [];
       peticion.on('data', (trozo: Buffer) => trozos.push(trozo));
       peticion.on('end', () => {
@@ -74,6 +77,7 @@ export class UpstreamFalso {
 
   reiniciar(): void {
     this.recibidas.length = 0;
+    this.iniciadas = 0;
     this.manejador = ECO;
   }
 

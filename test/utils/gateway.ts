@@ -31,7 +31,12 @@ export class Servicios {
     this.identidad.encendida = true;
   }
 
-  /** Cuántas peticiones recibieron, entre todos. */
+  /** Cuántas peticiones empezaron a llegarles, entre todos (aunque se cortaran). */
+  totalIniciadas(): number {
+    return Object.values(this.upstreams).reduce((n, u) => n + u.iniciadas, 0);
+  }
+
+  /** Cuántas peticiones recibieron completas, entre todos. */
   totalRecibidas(): number {
     return Object.values(this.upstreams).reduce((n, u) => n + u.recibidas.length, 0);
   }
