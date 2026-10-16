@@ -340,15 +340,30 @@ recorrer() {
   grep -i '^access-control-' <<<"$cabeceras" | tr -d '\r' | sed 's/^/  /'
 
   titulo '11. El mismo X-Request-Id en la respuesta y en los logs del gateway y del core'
-  local en_gateway en_core
+  local en_gateway en_core en_respuesta
+  en_respuesta="$(curl -s -D - -o /dev/null "$GW/flights/v1/bookings?limit=5" \
+    -H "authorization: Bearer $token" -H "x-request-id: $id_peticion" |
+    tr -d '\r' | sed -n 's/^x-request-id: //Ip')"
+  verificar 'X-Request-Id de la respuesta' "$id_peticion" "$en_respuesta"
   en_gateway="$(grep -c "$id_peticion" "$LOGS/gateway.log" || true)"
   en_core="$(grep -c "$id_peticion" "$LOGS/core.log" || true)"
   verificar "líneas del gateway con $id_peticion" 'alguna' "$([[ $en_gateway -gt 0 ]] && echo alguna || echo ninguna)"
   verificar "líneas del core con $id_peticion" 'alguna' "$([[ $en_core -gt 0 ]] && echo alguna || echo ninguna)"
   grep -m1 "$id_peticion" "$LOGS/gateway.log" | sed 's/^/  gateway: /'
-  grep -m1 "$id_peticion" "$LOGS/core.log" | cut -c1-300 | sed 's/^/  core:    /'
+  # La línea de acceso del core (sin los colores del logger de Nest en desarrollo)
+  grep "$id_peticion" "$LOGS/core.log" | grep -m1 'HTTP' | sed 's/\x1b\[[0-9;]*m//g' |
+    cut -c1-220 | sed 's/^/  core:    /'
 
-  titulo '12. Ningún token completo en los logs de los seis procesos'
+  titulo '12. IP real: un X-Forwarded-For del cliente no llega al core'
+  local id_ip
+  id_ip="$(uuid)"
+  pedir GET /flights/v1/bookings -H "authorization: Bearer $token" -H "x-request-id: $id_ip" \
+    -H 'x-forwarded-for: 203.0.113.66' -H 'x-real-ip: 203.0.113.66' >/dev/null
+  local linea_ip
+  linea_ip="$(grep "$id_ip" "$LOGS/core.log" | grep -m1 'HTTP' | sed 's/\x1b\[[0-9;]*m//g')"
+  verificar 'ip que registró el core (TRUST_PROXY=1)' 'ip=127.0.0.1' "$(grep -o 'ip=[0-9a-f.:]*' <<<"$linea_ip")"
+
+  titulo '13. Ningún token completo en los logs de los seis procesos'
   local con_token=0
   for archivo in "$LOGS"/*.log; do
     if grep -qF "$token" "$archivo" || grep -qF "$admin_token" "$archivo"; then
