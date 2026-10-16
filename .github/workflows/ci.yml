@@ -1,0 +1,120 @@
+# Integración continua: en cada push y pull request a main, lint, formato, tipos, compilación,
+# pruebas (no hace falta ningún servicio: las pruebas levantan upstreams falsos y un identity falso),
+# el arranque del gateway compilado y la imagen de Docker. Además, la copia del OpenAPI del core se
+# compara con la de main del core (solo informa).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verificar:
+    name: lint, tipos, build y pruebas
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Dependencias
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Formato
+        run: npm run format:check
+
+      - name: Tipos (también test/)
+        run: npm run typecheck
+
+      - name: Compilación
+        run: npm run build
+
+      - name: Pruebas
+        run: npm test
+
+      - name: Tabla de rutas
+        run: node dist/cli/listar-rutas.js
+
+      # Arranca el gateway compilado como en producción, sin upstreams al otro lado: comprueba el
+      # entorno validado, el contrato empaquetado y lo que se responde sin llegar a un servicio.
+      - name: Arranque y smoke
+        env:
+          NODE_ENV: production
+          PORT: '8080'
+          UPSTREAM_CORE_URL: http://127.0.0.1:9
+          UPSTREAM_BFF_URL: http://127.0.0.1:9
+          UPSTREAM_IDENTITY_URL: http://127.0.0.1:9
+          UPSTREAM_NOTIFIER_URL: http://127.0.0.1:9
+          JWT_ISSUER: https://gateway.quinde.example
+          TRUST_PROXY_HOPS: '1'
+        run: |
+          node dist/main.js > gateway.log 2>&1 &
+          PID=$!
+          for i in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:8080/health >/dev/null 2>&1 && break
+            sleep 1
+          done
+          status=0
+          bash scripts/smoke.sh http://127.0.0.1:8080 || status=$?
+          kill "$PID" 2>/dev/null || true
+          [ "$status" -eq 0 ] || { echo '--- gateway.log'; cat gateway.log; }
+          exit "$status"
+
+  contrato:
+    name: contrato del core (informativo)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Informa si la copia de contracts/vuelos-openapi.yaml se quedó atrás del core; no bloquea
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+
+      - name: Comparar con main del core
+        run: npm run contrato:check
+
+  imagen:
+    name: imagen de Docker
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Construir la imagen (sin publicarla)
+        run: docker build -t quinde-gateway:ci .
+
+      - name: La imagen corre sin privilegios, trae el contrato y arranca
+        run: |
+          test "$(docker run --rm --entrypoint id quinde-gateway:ci -u)" = "1000"
+          docker run --rm --entrypoint sh quinde-gateway:ci -c 'test -f contracts/vuelos-openapi.yaml'
+          docker run -d --name gw -p 8080:8080 \
+            -e UPSTREAM_CORE_URL=http://127.0.0.1:9 -e UPSTREAM_BFF_URL=http://127.0.0.1:9 \
+            -e UPSTREAM_IDENTITY_URL=http://127.0.0.1:9 -e UPSTREAM_NOTIFIER_URL=http://127.0.0.1:9 \
+            -e JWT_ISSUER=https://gateway.quinde.example quinde-gateway:ci
+          for i in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:8080/health/ready && break
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:8080/health/ready
+          docker rm -f gw
