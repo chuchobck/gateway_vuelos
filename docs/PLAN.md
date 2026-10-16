@@ -103,9 +103,9 @@ configuración que el resto de repos.
 16. **`/graphql` es pública y no se limita por operación en el borde**: eso ya lo hace el BFF.
 17. **El JWKS se baja del identity interno** (`{UPSTREAM_IDENTITY_URL}/.well-known/jwks.json`) y no
     del origen público, para que el gateway no se llame a sí mismo.
-18. **Rama**: se pidió `feat/r2-gateway` y la sesión tenía asignada `claude/stoic-carson-rfzywk`. El
-    trabajo se hizo en `feat/r2-gateway`. Si el push a esa rama no se permitiera, iría a la de la
-    sesión (lo dice el reporte del PR).
+18. **Rama**: se pidió `feat/r2-gateway` y la sesión tenía asignada `claude/stoic-carson-rfzywk`.
+    El push a `feat/r2-gateway` se aceptó, así que todo está en esa rama y el pull request sale de
+    ella.
 
 ## Commits de la fase 6a
 
