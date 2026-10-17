@@ -2,7 +2,7 @@ import { Context, Span, SpanKind, trace } from '@opentelemetry/api';
 import { FastifyInstance, FastifyRequest } from 'fastify';
 import { RUTA_SIN_PLANTILLA, metodoNormalizado } from './atributos';
 import { Metricas } from './metricas';
-import { marcarError, Trazas } from './trazas';
+import { CLAVE_REQUEST_ID, marcarError, Trazas } from './trazas';
 
 /**
  * El único archivo del módulo atado a Fastify: abre el span raíz de cada petición, lo deja activo
@@ -48,7 +48,8 @@ export function observar(trazas: Trazas, peticion: FastifyRequest): ObservacionP
   );
   const observacion: ObservacionPeticion = {
     span,
-    contexto: trace.setSpan(padre, span),
+    // El request id viaja en el contexto: el logger lo agrega a cada línea (camposDeTraza)
+    contexto: trace.setSpan(padre, span).setValue(CLAVE_REQUEST_ID, peticion.id),
     inicio: process.hrtime.bigint(),
   };
   peticion.observacion = observacion;

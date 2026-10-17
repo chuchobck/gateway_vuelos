@@ -1,6 +1,7 @@
 import {
   Context,
   context,
+  createContextKey,
   ROOT_CONTEXT,
   Span,
   SpanKind,
@@ -37,6 +38,9 @@ export interface ConfiguracionTrazas {
   /** Solo pruebas: cada cuánto sale un lote (ms). */
   esperaLoteMs?: number;
 }
+
+/** Dónde va el request id dentro del contexto de la petición (lo lee `camposDeTraza`). */
+export const CLAVE_REQUEST_ID = createContextKey('quinde.request_id');
 
 /** Cola acotada: si el recolector no da abasto, los spans de más se descartan. */
 export const COLA_MAXIMA_SPANS = 2048;
@@ -164,12 +168,16 @@ export function marcarError(span: Span, tipo: string): void {
 }
 
 /**
- * `traceId` y `spanId` del span activo, para el `mixin` del logger: toda línea de log escrita
- * dentro de una petición los lleva. Fuera de una petición (arranque), nada.
+ * `requestId`, `traceId` y `spanId` de la petición en curso, para el `mixin` del logger: TODA
+ * línea escrita dentro de una petición los lleva (también las de quien no recibe la petición, como
+ * el verificador de tokens). Fuera de una petición (arranque, tareas), nada.
  */
-export function camposDeTraza(): { traceId?: string; spanId?: string } {
-  const span = trace.getSpan(context.active());
-  if (!span) return {};
-  const { traceId, spanId } = span.spanContext();
-  return { traceId, spanId };
+export function camposDeTraza(): { requestId?: string; traceId?: string; spanId?: string } {
+  const activo = context.active();
+  const span = trace.getSpan(activo);
+  const requestId = activo.getValue(CLAVE_REQUEST_ID);
+  return {
+    ...(typeof requestId === 'string' ? { requestId } : {}),
+    ...(span ? { traceId: span.spanContext().traceId, spanId: span.spanContext().spanId } : {}),
+  };
 }

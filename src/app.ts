@@ -18,8 +18,13 @@ import { Reloj } from './common/reloj';
 import { CABECERA_REQUEST_ID, requestIdDe } from './common/request-id';
 import { Configuracion, NombreUpstream, UPSTREAMS } from './config/entorno';
 import { cabecerasHaciaCliente, cabecerasHaciaUpstream, hostValido } from './proxy/cabeceras';
-import { filtrarAtributos } from './observabilidad/atributos';
-import { fijarRuta, instrumentarFastify, observar } from './observabilidad/fastify';
+import { filtrarAtributos, RUTA_SIN_PLANTILLA } from './observabilidad/atributos';
+import {
+  CABECERA_TRACE_ID,
+  fijarRuta,
+  instrumentarFastify,
+  observar,
+} from './observabilidad/fastify';
 import { Metricas } from './observabilidad/metricas';
 import { camposDeTraza, marcarError, traceparentDe, Trazas } from './observabilidad/trazas';
 import { ClienteUpstream, ErrorUpstream } from './proxy/cliente-upstream';
@@ -37,8 +42,6 @@ import { VerificadorJwks } from './seguridad/verificador-jwks';
 interface ContextoPeticion {
   inicio: bigint;
   ip: string;
-  /** Ruta canónica sin query, o undefined si no se pudo normalizar. */
-  ruta?: string;
   upstream?: NombreUpstream | 'gateway';
   /** Por qué el borde respondió él mismo (bloqueada, desconocida, ambigua, token, scope...). */
   motivo?: string;
@@ -127,6 +130,9 @@ export function construirApp(opciones: OpcionesApp): FastifyInstance {
       requestIdLogLabel: 'requestId',
     }),
     genReqId: (peticion) => requestIdDe(peticion.headers[CABECERA_REQUEST_ID]),
+    // Sin el binding de Fastify: requestId, traceId y spanId los pone el mixin desde el contexto
+    // de la petición, en TODA línea (si no, requestId saldría dos veces en las de peticion.log)
+    childLoggerFactory: (logger, _bindings, opciones) => logger.child({}, opciones),
     trustProxy: false,
     // El cuerpo no se lee aquí: pasa en streaming al upstream (ver el parser de abajo)
     bodyLimit: 1024 * 1024,
@@ -134,14 +140,18 @@ export function construirApp(opciones: OpcionesApp): FastifyInstance {
     frameworkErrors: (error, peticion, respuesta) => {
       const problema = new ErrorBorde(400, 'The request path is ambiguous or malformed');
       // Fastify la rechaza antes del gancho onRequest: aquí se abre su traza
-      const { contexto } = observar(trazas, peticion as unknown as FastifyRequest);
-      trazas.enContexto(contexto, () =>
-        peticion.log.info({ status: 400, motivo: 'url-invalida', err: error }, 'acceso'),
+      const observacion = observar(trazas, peticion as unknown as FastifyRequest);
+      trazas.enContexto(observacion.contexto, () =>
+        peticion.log.info(
+          { status: 400, ruta: RUTA_SIN_PLANTILLA, motivo: 'url-invalida', err: error },
+          'acceso',
+        ),
       );
       void (respuesta as unknown as FastifyReply)
         .code(400)
         .header('content-type', CONTENT_TYPE_PROBLEMA)
         .header('x-request-id', peticion.id)
+        .header(CABECERA_TRACE_ID, observacion.span.spanContext().traceId)
         .header('x-content-type-options', 'nosniff')
         .send(JSON.stringify(problema.problema()));
     },
@@ -206,7 +216,8 @@ export function construirApp(opciones: OpcionesApp): FastifyInstance {
       peticion.log.info(
         {
           metodo: peticion.method,
-          ruta: contexto.ruta ?? '-',
+          // La PLANTILLA, nunca la ruta pedida: una ruta cruda puede traer un id de reserva o un correo
+          ruta: peticion.observacion?.ruta ?? RUTA_SIN_PLANTILLA,
           upstream: contexto.upstream ?? null,
           status: respuesta.statusCode,
           ms,
@@ -240,7 +251,6 @@ export function construirApp(opciones: OpcionesApp): FastifyInstance {
       contexto.motivo = 'ambigua';
       throw error;
     }
-    contexto.ruta = ruta.ruta;
 
     const decision = resolver.decidir(peticion.method, ruta);
     // La plantilla nombra el span y etiqueta las métricas; sin regla, queda __unmatched__
