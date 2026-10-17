@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+
 /**
  * Entorno del gateway, validado al arrancar: si algo falta o no sirve, el proceso no levanta y
  * dice qué variable revisar. Un mensaje nombra la variable, nunca su valor (puede ser una URL
@@ -39,6 +42,23 @@ export interface Configuracion {
     estrictoVentanaSegundos: number;
     estricto: number;
   };
+  /** Trazas y métricas (docs/OBSERVABILIDAD.md). */
+  observabilidad: {
+    /** `service.name` (OTEL_SERVICE_NAME): quinde-gateway. */
+    servicio: string;
+    /** `service.version`: la de package.json. */
+    version: string;
+    /** `deployment.environment`: NODE_ENV. */
+    entorno: string;
+    /** OTEL_EXPORTER_OTLP_ENDPOINT: sin valor, las trazas se generan y propagan pero no se exportan. */
+    endpointOtlp?: string;
+    /** OTEL_TRACES_SAMPLER_ARG: fracción de trazas raíz que se registran. */
+    muestreo: number;
+    /** TRACE_TRUST_INCOMING: continuar el traceparent del cliente en lugar de abrir una traza nueva. */
+    confiarEntrante: boolean;
+    /** METRICS_PORT: puerto aparte de /metrics; 0 lo apaga. */
+    puertoMetricas: number;
+  };
 }
 
 /** Lo que el gateway no puede adivinar; lo demás tiene un valor por defecto. */
@@ -57,6 +77,10 @@ export const LIMITE_GLOBAL_POR_DEFECTO = 300;
 export const LIMITE_ESTRICTO_POR_DEFECTO = 20;
 export const VENTANA_POR_DEFECTO_SEGUNDOS = 60;
 export const SALTOS_MAXIMOS = 10;
+export const SERVICIO_POR_DEFECTO = 'quinde-gateway';
+export const PUERTO_METRICAS_POR_DEFECTO = 9464;
+/** Todas las trazas en desarrollo; una de cada diez en producción. */
+export const MUESTREO_POR_DEFECTO = { desarrollo: 1, produccion: 0.1 };
 
 const NIVELES_LOG = ['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent'];
 
@@ -141,9 +165,40 @@ export function leerEntorno(variables: Variables = process.env): Configuracion {
     errores.push(`LOG_LEVEL debe ser uno de: ${NIVELES_LOG.join(', ')}`);
   }
 
+  const servicio = texto('OTEL_SERVICE_NAME') ?? SERVICIO_POR_DEFECTO;
+  if (!/^[a-z][a-z0-9-]{0,62}$/.test(servicio)) {
+    errores.push('OTEL_SERVICE_NAME debe ser un nombre en minúsculas, dígitos y guiones');
+  }
+
+  const endpointOtlp = texto('OTEL_EXPORTER_OTLP_ENDPOINT');
+  if (endpointOtlp !== undefined && !esUrlHttp(endpointOtlp)) {
+    errores.push('OTEL_EXPORTER_OTLP_ENDPOINT debe ser una URL http(s) sin credenciales');
+  }
+
+  let muestreo = produccion ? MUESTREO_POR_DEFECTO.produccion : MUESTREO_POR_DEFECTO.desarrollo;
+  const fraccion = texto('OTEL_TRACES_SAMPLER_ARG');
+  if (fraccion !== undefined) {
+    if (!/^(0(\.\d+)?|1(\.0+)?)$/.test(fraccion)) {
+      errores.push('OTEL_TRACES_SAMPLER_ARG debe ser una fracción entre 0 y 1');
+    } else {
+      muestreo = Number(fraccion);
+    }
+  }
+
+  const confiar = texto('TRACE_TRUST_INCOMING') ?? 'false';
+  if (confiar !== 'true' && confiar !== 'false') {
+    errores.push('TRACE_TRUST_INCOMING debe ser true o false');
+  }
+
+  const puerto = entero('PORT', PUERTO_POR_DEFECTO, 1, 65_535);
+  const puertoMetricas = entero('METRICS_PORT', PUERTO_METRICAS_POR_DEFECTO, 0, 65_535);
+  if (puertoMetricas !== 0 && puertoMetricas === puerto) {
+    errores.push('METRICS_PORT debe ser distinto de PORT (el ingress solo expone PORT)');
+  }
+
   const configuracion: Configuracion = {
     produccion,
-    puerto: entero('PORT', PUERTO_POR_DEFECTO, 1, 65_535),
+    puerto,
     host: texto('HOST') ?? '0.0.0.0',
     nivelLog,
     upstreams,
@@ -164,6 +219,15 @@ export function leerEntorno(variables: Variables = process.env): Configuracion {
         86_400,
       ),
       estricto: entero('RATE_LIMIT_STRICT_MAX', LIMITE_ESTRICTO_POR_DEFECTO, 1, 1_000_000),
+    },
+    observabilidad: {
+      servicio,
+      version: versionDelPaquete(),
+      entorno: nodeEnv,
+      ...(endpointOtlp !== undefined && esUrlHttp(endpointOtlp) ? { endpointOtlp } : {}),
+      muestreo,
+      confiarEntrante: confiar === 'true',
+      puertoMetricas,
     },
   };
 
@@ -191,5 +255,17 @@ function esUrlHttp(valor: string): boolean {
     );
   } catch {
     return false;
+  }
+}
+
+/** La versión de package.json (dos niveles arriba desde src/config o dist/config). */
+function versionDelPaquete(): string {
+  try {
+    const paquete = JSON.parse(
+      readFileSync(join(__dirname, '..', '..', 'package.json'), 'utf8'),
+    ) as { version?: unknown };
+    return typeof paquete.version === 'string' ? paquete.version : '0.0.0';
+  } catch {
+    return '0.0.0';
   }
 }
