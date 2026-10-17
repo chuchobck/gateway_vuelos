@@ -69,12 +69,12 @@ describe('cabeceras', () => {
   });
 
   describe('hacia el upstream', () => {
-    it('pasan tal cual Authorization, Idempotency-Key, X-Device-Fingerprint, traceparent y tracestate', async () => {
+    // traceparent no pasa tal cual: el gateway abre su traza (test/trazas.spec.ts)
+    it('pasan tal cual Authorization, Idempotency-Key, X-Device-Fingerprint y tracestate', async () => {
       const cabeceras = {
         authorization: 'Bearer cualquier.cosa.aqui',
         'idempotency-key': '0f8fad5b-d9cb-469f-a165-70867728950e',
         'x-device-fingerprint': 'huella-de-prueba-123',
-        traceparent: '00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01',
         tracestate: 'congo=t61rcWkgMzE,rojo=00f067aa0ba902b7',
         'if-none-match': '"abc"',
         'accept-encoding': 'gzip, br',
@@ -211,7 +211,7 @@ describe('cabeceras', () => {
       expect(respuesta.cabeceras['access-control-allow-origin']).toBe(ORIGEN_PERMITIDO);
       expect(respuesta.cabeceras['access-control-allow-credentials']).toBeUndefined();
       expect(respuesta.cabeceras['access-control-expose-headers']).toBe(
-        'x-request-id, retry-after',
+        'x-request-id, x-trace-id, retry-after',
       );
       expect(respuesta.cabeceras.vary).toBe('Accept-Encoding, Origin');
     });

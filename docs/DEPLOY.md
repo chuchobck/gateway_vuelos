@@ -44,6 +44,11 @@ Un error de validación nombra la variable, nunca su valor, y el proceso sale co
 | `RATE_LIMIT_WINDOW_SECONDS` | No | `60` | `60` | Ventana del límite global |
 | `RATE_LIMIT_STRICT_MAX` | No | `20` | `20` | Por IP y por ruta, en `/oauth2/token`, `/identity/v1/auth/login` y `/register` |
 | `RATE_LIMIT_STRICT_WINDOW_SECONDS` | No | `60` | `60` | Ventana del límite estricto |
+| `OTEL_SERVICE_NAME` | No | `quinde-gateway` | `quinde-gateway` | `service.name` de las trazas y de `quinde_build_info` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | No | (vacía: no se exporta) | `http://otel-collector:4318` | Base OTLP/HTTP; los spans van a `{base}/v1/traces`. Sin valor, las trazas igual se generan y se propagan |
+| `OTEL_TRACES_SAMPLER_ARG` | No | `1.0` en desarrollo, `0.1` en producción | `0.1` | Fracción de trazas raíz que se registran (0 a 1) |
+| `TRACE_TRUST_INCOMING` | No | `false` | `false` | `true` continúa el `traceparent` del cliente. Solo si delante hay un proxy de confianza que lo genera |
+| `METRICS_PORT` | No | `9464` | `9464` | Puerto APARTE de `GET /metrics` (Prometheus); 0 lo apaga. Tiene que ser distinto de `PORT` |
 
 **Los límites son en memoria, por réplica.** Con N réplicas, un cliente tiene N veces el límite (y
 el balanceador puede repartirlo distinto). Cada servicio sigue teniendo su propio límite detrás,
@@ -70,6 +75,12 @@ adelantarse a ellos: el borde corta las ráfagas grandes y identity sigue decidi
   los upstreams: un servicio caído no saca de rotación al gateway. `/health/upstreams` es solo
   informativo.
 - Escalado: cualquier número de réplicas sirve (sin estado), pero el límite por IP es por réplica.
+- **Métricas**: el ingress apunta solo al 8080. El 9464 (`METRICS_PORT`) queda para la red interna:
+  se declara como puerto adicional TCP del contenedor (`additionalPortMappings`, sin `external`) y
+  Prometheus raspa `http://gateway-vuelos:9464/metrics`. En el puerto público, `/metrics` es 404.
+- **Trazas**: `OTEL_EXPORTER_OTLP_ENDPOINT` apunta a un recolector interno (un OpenTelemetry Collector
+  o Jaeger como Container App interna). Sin él, no se exporta nada y nada se rompe: el gateway sigue
+  generando trace-ids para los logs y `X-Trace-Id`.
 
 ## 4. Lo que cambia en los otros servicios
 
@@ -106,3 +117,5 @@ La verificación completa, con los cinco servicios en local, está en [E2E-LOCAL
 | 429 enseguida para todos | `TRUST_PROXY_HOPS=0` detrás de un ingress: todos cuentan como la IP del ingress |
 | Un servicio limita a todos juntos | Ese servicio no tiene `TRUST_PROXY=1` |
 | 504 en la primera petición del día | El core del plan gratuito estaba dormido más de `TIMEOUT_CORE_MS` |
+| No llegan trazas al recolector | `OTEL_EXPORTER_OTLP_ENDPOINT` es la base (`http://host:4318`), no `.../v1/traces`; el recolector tiene que aceptar OTLP/HTTP en JSON. Un envío que falla se descarta sin log por petición |
+| `/metrics` da 404 | Es lo esperado en el puerto público: las métricas están en `METRICS_PORT` |

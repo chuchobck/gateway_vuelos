@@ -32,9 +32,17 @@ apps, B2B        │ CORS · X-Request-Id · IP real · streaming  │──▶ 
   sin reintentos.
 - **Salud**: `/health`, `/health/ready` (no depende de los upstreams) y `/health/upstreams`
   (informativo).
+- **Observabilidad**:
+  - Trazas W3C con OpenTelemetry: el gateway es la raíz y propaga `traceparent` a cada upstream.
+  - `X-Trace-Id` en cada respuesta y `traceId` en cada línea de log.
+  - Métricas Prometheus en un puerto aparte (`METRICS_PORT`, 9464).
+  - El estándar que siguen los demás servicios está en
+    [`docs/OBSERVABILIDAD.md`](docs/OBSERVABILIDAD.md); Jaeger y Prometheus locales, en
+    [`observabilidad/`](observabilidad/).
 
-Node 22, TypeScript estricto y Fastify 5, sin Nest. Las únicas dependencias son `fastify`, `jose` y
-`yaml`, justificadas en [`docs/PLAN.md`](docs/PLAN.md). Reglas en [`CLAUDE.md`](CLAUDE.md);
+Node 22, TypeScript estricto y Fastify 5, sin Nest. Dependencias: `fastify`, `jose`, `yaml`,
+OpenTelemetry (`api`, `sdk-trace-node`, `exporter-trace-otlp-http`, `resources`) y `prom-client`,
+justificadas en [`docs/PLAN.md`](docs/PLAN.md). Reglas en [`CLAUDE.md`](CLAUDE.md);
 despliegue y variables en [`docs/DEPLOY.md`](docs/DEPLOY.md).
 
 ## Empezar en local
@@ -46,6 +54,7 @@ cp .env.example .env    # y ajusta las UPSTREAM_*_URL y JWT_ISSUER
 npm run build
 node --env-file=.env dist/main.js
 curl -s localhost:8080/health/upstreams | jq
+curl -s localhost:9464/metrics | grep '^http_server_requests_total'
 ```
 
 Con los cinco servicios de verdad (identity, core, notifier, bff y este gateway) y un recorrido

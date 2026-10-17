@@ -1,0 +1,24 @@
+# Prometheus para la observabilidad local (docker-compose.yml de esta carpeta). Raspa el puerto de
+# métricas (METRICS_PORT) de cada servicio, que nunca es el puerto público.
+#
+# En Azure Container Apps, los objetivos son los nombres internos: gateway-vuelos:9464,
+# bff-vuelos:9464, core-vuelos:9464, identity-vuelos:9464 y notifier-vuelos:9464 (cada contenedor
+# usa el 9464 por defecto).
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: quinde
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['host.docker.internal:9464']
+        labels: { service: quinde-gateway }
+      - targets: ['host.docker.internal:9465']
+        labels: { service: quinde-bff }
+      - targets: ['host.docker.internal:9466']
+        labels: { service: quinde-core }
+      - targets: ['host.docker.internal:9467']
+        labels: { service: quinde-identity }
+      - targets: ['host.docker.internal:9468']
+        labels: { service: quinde-notifier }

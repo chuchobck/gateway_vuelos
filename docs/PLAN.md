@@ -1,6 +1,8 @@
 # Plan — Quinde · Gateway
 
-Reto 2 de Integración de Sistemas (PUCE). Fase 6a: la puerta única de la arquitectura. Enruta a
+Reto 2 de Integración de Sistemas (PUCE). Fase 6a: la puerta única de la arquitectura. Fase 7a:
+la observabilidad (trazas, métricas y logs), cuyo estándar define este repo para los cinco
+servicios ([OBSERVABILIDAD.md](OBSERVABILIDAD.md)). Enruta a
 core, bff, identity y notifier, aplica las políticas de seguridad en el borde y esconde lo
 interno. No tiene lógica de negocio ni base de datos. Los servicios siguen validando todo: el
 gateway nunca es la única barrera.
@@ -10,6 +12,7 @@ gateway nunca es la única barrera.
 | Fase | Estado | Verificación |
 | --- | --- | --- |
 | 6a. Gateway | Hecha (2026-10-16), en `feat/r2-gateway` | `lint`, `format:check` y `build` en cada commit. `npm test`: 345 pruebas en 10 suites, contra upstreams falsos HTTP reales y un identity falso con JWKS. `npm run test:mutaciones`: 17 de 17 detectadas. `scripts/smoke.sh` contra el gateway compilado y contra la imagen de Docker (uid 1000, `/health/ready` 200). Recorrido real con los cinco servicios en `main`, solo por el gateway: `scripts/e2e-local.sh`, todo en verde (salida en [E2E-LOCAL.md](E2E-LOCAL.md)) |
+| 7a. Observabilidad | Hecha (2026-10-17), en `feat/r2-observabilidad` | `lint`, `format:check` y `build` en cada commit. `npm test`: 404 pruebas en 14 suites, con un recolector OTLP falso por HTTP. `npm run test:mutaciones`: 23 de 23 (6 nuevas). `scripts/smoke.sh` con X-Trace-Id y `/metrics` 404. Recorrido real con los cinco servicios: métricas en el 9464 y spans en un recolector OTLP falso, todo en verde (salida en [E2E-LOCAL.md](E2E-LOCAL.md)). Jaeger y Prometheus reales: sin verificar (no había Docker) |
 
 ## Dependencias (y por qué cada una)
 
@@ -18,6 +21,11 @@ gateway nunca es la única barrera.
 | `fastify` 5 | Servidor HTTP, hooks y logger JSON (pino, incluido) | Lo pide la fase. Sin Nest: un proxy delgado no necesita inyección de dependencias ni decoradores. El logger viene con Fastify y no hace falta otra dependencia de logs |
 | `jose` 6 | Verificar RS256 con el JWKS | Es la del verificador del core y del notifier. Copiarlo tal cual exige la misma biblioteca |
 | `yaml` 2 | Leer `contracts/vuelos-openapi.yaml` al arrancar | El contrato del core es YAML. Sin dependencias propias. Una copia convertida a JSON sería un segundo archivo que mantener en sincronía |
+| `@opentelemetry/api` 1.9 | La API de trazas (span, contexto, propagación) | La pide la fase 7a; es la que usarán los otros servicios |
+| `@opentelemetry/sdk-trace-node` 2.12 | El proveedor de trazas, el sampler, el BatchSpanProcessor y el contexto con AsyncLocalStorage | Lo pide la fase. Sin `sdk-node` (arrastra instrumentaciones automáticas y métricas OTel que no se usan) |
+| `@opentelemetry/exporter-trace-otlp-http` 0.223 | Mandar los spans por OTLP/HTTP en JSON | Lo pide la fase. JSON (y no protobuf): Jaeger y el Collector lo aceptan, y las pruebas lo leen sin otra dependencia |
+| `@opentelemetry/resources` 2.12 | `resourceFromAttributes` para `service.name`, `service.version` y `deployment.environment` | Fuera de las nombradas por la fase. Ya es dependencia del SDK (misma versión): importarla directo no agrega código |
+| `prom-client` 15 | Métricas Prometheus con un `Registry` propio y las del proceso | Lo pide la fase. Sin las métricas de OpenTelemetry: Prometheus raspa el texto de prom-client sin un Collector |
 
 **No se usó:**
 
@@ -171,3 +179,121 @@ configuración que el resto de repos.
 | bff_vuelos | `TRUST_PROXY=1` (ya en `render.yaml`); `CORS_ORIGINS` vacía; ingress interno |
 | e-commerce_vuelos | `VITE_API_URL=https://<gateway>/flights/v1` y `VITE_GRAPHQL_URL=https://<gateway>/graphql`. Cuenta (register, login, refresh, logout, me) a `https://<gateway>/identity/v1/auth/*`: hoy usa `{VITE_API_URL}/auth/*`. Hace falta una base nueva para identity (por ejemplo `VITE_IDENTITY_URL=https://<gateway>/identity/v1`) o derivarla del origen |
 | backoffice_vuelos | `public/config.js`: `API_URL: "https://<gateway>/flights/v1"` (no usa `VITE_*`: se configura en tiempo de ejecución). Login, refresh, me y administradores a `https://<gateway>/identity/v1/auth/*` y `/identity/v1/admin/users`. En desarrollo, el proxy de Vite (`BACKEND_URL`) apunta al gateway y agrega `/identity` y `/graphql` a las rutas que reenvía |
+
+## Fase 7a: observabilidad
+
+### Qué se hizo
+
+- El estándar de los cinco servicios: [OBSERVABILIDAD.md](OBSERVABILIDAD.md).
+- El módulo `src/observabilidad/`, copiable:
+  - `traceparent.ts`, `atributos.ts`, `trazas.ts` y `metricas.ts`, sin framework;
+  - `fastify.ts`, el gancho a Fastify.
+- La integración en el gateway:
+  - un span raíz por petición, activo durante todo su ciclo;
+  - `auth.verify` y un span cliente por upstream;
+  - `traceparent` nuevo hacia cada upstream;
+  - X-Trace-Id;
+  - logs con requestId, traceId y spanId;
+  - métricas en `METRICS_PORT`;
+  - `/metrics` bloqueado en el puerto público.
+- `observabilidad/` con Jaeger, Prometheus y las consultas PromQL.
+
+### Decisiones (tomadas sin consultar)
+
+1. **`traceparent` estricto: solo la versión `00` exacta.** W3C admite campos extra en versiones
+   futuras; en el borde, lo que no se sabe leer se descarta y se abre una traza nueva. Se descartan
+   también la cabecera repetida (Node la une con coma) y cualquier id en ceros.
+2. **`tracestate` pasa intacto aunque el gateway abra una traza nueva**, como pide la fase. W3C
+   sugiere descartarlo cuando se reinicia la traza: es de los proveedores y el gateway no lo
+   interpreta. Uno fuera del tope (512 caracteres, 32 miembros, imprimible) se descarta **entero**;
+   no se recorta.
+3. **Muestreo por defecto: 1.0 en desarrollo y 0.1 en producción.** La fase pedía "1.0 en
+   desarrollo"; se leyó que en producción hace falta otro valor.
+4. **`error.type` se agregó a los atributos permitidos**, con una lista cerrada de valores
+   (`timeout`, `unavailable`, motivos de auth y `500` a `504`). Es el atributo de la convención
+   semántica para el tipo de error y no lleva datos de nadie.
+5. **El requestId viaja en el contexto de OpenTelemetry** y lo agrega el `mixin` del logger. Así
+   llega también a las líneas de quien no recibe la petición (el verificador de tokens). Se quitó
+   el binding propio del child logger de Fastify para que no salga dos veces.
+6. **La línea de acceso registra la plantilla de la ruta, no la ruta canónica** (cambio respecto de
+   la 6a). La regla nueva prohíbe ids de reserva y correos en los logs, y una ruta cruda los puede
+   traer. Para ligar un caso concreto están el requestId y el traceId.
+7. **La plantilla de una regla sin contrato es su patrón**, con `*` como `{id}`
+   (`/flights/v1/webhooks/{id}`) y `**` tal cual (`/identity/v1/**`). Es una tabla finita: la
+   cardinalidad queda acotada.
+8. **El span cliente termina cuando termina el cuerpo de la respuesta**, no al llegar las cabeceras:
+   un PDF grande cuenta entero en `http_client_request_duration_seconds`. Un 5xx del upstream marca
+   error en ese span; en el raíz, solo un 5xx del gateway.
+9. **`http_client_request_duration_seconds` lleva `status="error"`** cuando no hubo respuesta (502 o
+   504 del borde). El tipo exacto va en `gateway_upstream_errors_total{kind}`.
+10. **Preflight**: ahora se decide la ruta antes de responderlo, solo para su plantilla (métrica y
+    span); la respuesta no cambia.
+11. **El exportador manda JSON** (el formato por defecto de `exporter-trace-otlp-http`). Lotes cada
+    2 s, cola de 2048, 3 s de plazo, cierre con tope de 5 s.
+12. **Las pruebas pasan el exportador por el transformador de Jest.** Carga `http` con `import()`
+    dinámico, que la VM de Jest rechaza sin `--experimental-vm-modules`. El transformador de `jose`
+    (ahora `test/utils/transformar-a-commonjs.js`) lo pasa a `require`. En producción no hace
+    falta: se verificó con el gateway compilado.
+13. **Puertos de métricas locales**: gateway 9464, bff 9465, core 9466, identity 9467 y notifier
+    9468. En contenedores, todos el 9464.
+14. **Sin versión nueva en `package.json`**: el CHANGELOG lo deja en "Sin publicar", como hacen el
+    core y el BFF con sus fases sin publicar. `service.version` sigue siendo 0.1.0.
+
+### Commits de la fase 7a
+
+| Commit | Qué |
+| --- | --- |
+| `feat(observabilidad): agregar el módulo de trazas W3C y métricas, y sus variables de entorno` | `src/observabilidad/`, el entorno y las dependencias |
+| `feat(observabilidad): integrar trazas y métricas en el ciclo de la petición, el proxy y el token` | `app.ts`, proxy, auth, CORS, `/metrics` bloqueado, `main.ts` |
+| `feat(observabilidad): poner requestId en toda línea de la petición y la plantilla en la de acceso` | `mixin`, child logger, X-Trace-Id en el 400 de Fastify |
+| `test(observabilidad): probar traceparent, propagación, spans, logs, métricas y resiliencia` | 4 suites nuevas y el recolector falso |
+| `test(mutaciones): agregar las seis de observabilidad y poner al día las de log y reintento` | 23 de 23 |
+| `docs(observabilidad): definir el estándar de trazas, métricas y logs para los cinco servicios` | `docs/OBSERVABILIDAD.md` y `observabilidad/` |
+| `build(observabilidad): exponer el puerto de métricas en la imagen y comprobarlo en el smoke y el CI` | Dockerfile, smoke y CI |
+| `test(e2e): verificar métricas y trazas del gateway en el recorrido local con los cinco servicios` | `scripts/e2e-local.sh` y el recolector falso |
+| `docs: ...` | RUTAS, DEPLOY, E2E-LOCAL, README, CLAUDE.md, CHANGELOG y este plan |
+
+### Qué no se pudo verificar
+
+- **Jaeger y Prometheus reales.** La sesión no tenía Docker: `observabilidad/docker-compose.yml`,
+  `prometheus.yml` y las consultas de `CONSULTAS.md` no se probaron. Sí se verificó lo que emite el
+  gateway:
+  - los spans en OTLP/HTTP JSON (`application/json`, ids en hex, `kind` OTLP), contra el recolector
+    falso, en Jest y en el recorrido real;
+  - el texto de `/metrics`, con prom-client.
+- **La imagen de Docker** con el puerto 9464: el CI la construye y raspa `/metrics`; en local no hubo
+  Docker.
+- **La continuidad de la traza en el BFF y el core**: todavía no leen `traceparent` (fases 7b y 7c).
+  Hoy la traza termina en el span cliente del gateway.
+- **Un despliegue** con el 9464 interno en Azure Container Apps.
+
+### Hallazgos
+
+- El `exporter-trace-otlp-http` carga `http` con `import()` dinámico aunque el paquete sea CommonJS.
+  Funciona en Node, pero no dentro de la VM de Jest sin `--experimental-vm-modules`. Los otros
+  servicios (Jest + ts-jest) se van a encontrar lo mismo: copien el transformador.
+- Con el `traceparent` ignorado por defecto, un frontend que genere uno no se liga con la traza del
+  gateway. Para eso está `X-Trace-Id` en la respuesta.
+- El `prometheus.yml` pone una etiqueta `service` por objetivo y `quinde_build_info` trae la suya:
+  Prometheus guarda la del servicio como `exported_service`.
+
+### Pendientes
+
+- Fase 7b: copiar el módulo al BFF y al core (HTTP y gRPC).
+- Fase 7c: identity, notifier y el `traceparent` en la bandeja del core.
+- Fase 7d: el análisis de latencia; agregar `route` a `http_client_request_duration_seconds` para
+  restar la latencia del upstream a la del gateway por ruta.
+- Verificar `observabilidad/docker-compose.yml` donde haya Docker.
+
+### Lo que deben copiar el BFF y el core (fase 7b)
+
+| Qué | Detalle |
+| --- | --- |
+| Módulo | `src/observabilidad/{traceparent,atributos,trazas,metricas}.ts` tal cual; el gancho, como middleware de Express (`docs/OBSERVABILIDAD.md`, sección 5) |
+| Dependencias | `@opentelemetry/api` 1.9.0, `@opentelemetry/sdk-trace-node` 2.12.0, `@opentelemetry/exporter-trace-otlp-http` 0.223.0, `@opentelemetry/resources` 2.12.0, `prom-client` 15.1.3, y en Jest el transformador de `otlp-exporter-base` |
+| Variables | `OTEL_SERVICE_NAME` (`quinde-bff`, `quinde-core`), `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_TRACES_SAMPLER_ARG`, `TRACE_TRUST_INCOMING=true` (los llama el gateway) y `METRICS_PORT` (9464 en contenedor; 9465 y 9466 en local) |
+| Métricas obligatorias | `http_server_request_duration_seconds`, `http_server_requests_total`, `http_client_request_duration_seconds` (bff → core), `quinde_build_info`, las del proceso; `route` siempre plantilla o `__unmatched__` (en gRPC, el nombre de la RPC) |
+| Propagación gRPC | El BFF abre un span cliente por llamada al core y manda `traceparent` (y `tracestate`) en la metadata, junto a `x-request-id`. El core lo lee en su interceptor de contexto gRPC y abre su span `SERVER` como hijo |
+| Logs | `traceId` y `spanId` de `camposDeTraza()` en cada línea, junto al requestId que ya ponen |
+| Respuesta | `X-Trace-Id` en las respuestas HTTP. En GraphQL, además, en `extensions` del error, junto al `requestId` |
+| Webhooks y bandeja (7c) | El notifier no manda `traceparent` a terceros. El core guarda el `traceparent` en `evento_saliente` y el relevo continúa esa traza |

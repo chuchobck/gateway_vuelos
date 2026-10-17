@@ -1,5 +1,8 @@
-// Transformador de Jest para `jose`, que desde la versión 6 solo se publica como ESM: lo pasa a
-// CommonJS con el compilador de TypeScript. Con target es2022 las clases quedan nativas; con
+// Transformador de Jest para dos paquetes que la VM de Jest no carga tal cual, con el compilador de
+// TypeScript (módulo CommonJS):
+// - `jose`, que desde la versión 6 solo se publica como ESM: lo pasa a CommonJS.
+// - `@opentelemetry/otlp-exporter-base`, CommonJS pero con `import('http')` dinámico, que dentro de
+//   la VM de Jest falla sin --experimental-vm-modules (en producción funciona): queda en `require`. Con target es2022 las clases quedan nativas; con
 // es2021 TypeScript mueve los campos de clase antes del super() de sus errores (que va dentro de
 // una expresión con comas) y `new JOSEError()` falla. ts-jest no sirve aquí: Jest guarda un solo
 // transformador por ruta, así que no admite otra configuración de ts-jest solo para esto.

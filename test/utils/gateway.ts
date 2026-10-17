@@ -1,8 +1,10 @@
 import { FastifyInstance } from 'fastify';
+import { Server } from 'node:http';
 import { AddressInfo } from 'node:net';
 import { Writable } from 'node:stream';
 import { construirApp } from '../../src/app';
 import { leerEntorno, NombreUpstream, UPSTREAMS } from '../../src/config/entorno';
+import { servidorMetricas } from '../../src/observabilidad/metricas';
 import { ReglaRuta } from '../../src/rutas/tabla-rutas';
 import { AUDIENCIA, EMISOR, IdentidadFalsa, OpcionesToken } from './identidad-falsa';
 import { pedir, Pedido, Respuesta } from './http-crudo';
@@ -55,6 +57,11 @@ export class GatewayDePrueba {
   readonly reloj = new RelojDePrueba();
   app!: FastifyInstance;
   base!: string;
+  /** Cada cuánto sale un lote de spans (ms); corto para no esperar los 2 s de producción. */
+  esperaLoteMs = 20;
+  /** El servidor de /metrics, en su propio puerto (como METRICS_PORT). */
+  baseMetricas!: string;
+  private metricas?: Server;
 
   constructor(
     readonly servicios: Servicios,
@@ -76,6 +83,8 @@ export class GatewayDePrueba {
       RATE_LIMIT_MAX: '100000',
       RATE_LIMIT_STRICT_MAX: '100000',
       LOG_LEVEL: 'debug',
+      // Las pruebas que no miran trazas no exportan; las que sí pasan OTEL_EXPORTER_OTLP_ENDPOINT
+      METRICS_PORT: '0',
       ...this.variables,
     });
     const logs = this.logs;
@@ -94,16 +103,32 @@ export class GatewayDePrueba {
       configuracion,
       reloj: this.reloj,
       destinoLogs,
+      esperaLoteMs: this.esperaLoteMs,
       ...(this.tabla ? { tabla: this.tabla } : {}),
     });
     await this.app.listen({ port: 0, host: '127.0.0.1' });
     const { port } = this.app.server.address() as AddressInfo;
     this.base = `http://127.0.0.1:${port}`;
+
+    this.metricas = servidorMetricas(this.app.observabilidad.metricas);
+    await new Promise<void>((listo) => this.metricas!.listen(0, '127.0.0.1', listo));
+    this.baseMetricas = `http://127.0.0.1:${(this.metricas.address() as AddressInfo).port}`;
     return this;
   }
 
   pedir(pedido: Pedido): Promise<Respuesta> {
     return pedir(this.base, pedido);
+  }
+
+  /** El texto de /metrics, por su puerto aparte. */
+  async textoMetricas(): Promise<string> {
+    return (await pedir(this.baseMetricas, { ruta: '/metrics' })).texto;
+  }
+
+  /** El valor de una serie de /metrics (`nombre{etiquetas}`), o undefined si no está. */
+  async valorMetrica(serie: string): Promise<number | undefined> {
+    const linea = (await this.textoMetricas()).split('\n').find((l) => l.startsWith(`${serie} `));
+    return linea === undefined ? undefined : Number(linea.slice(serie.length + 1));
   }
 
   /** Un token de identity falso, emitido a la hora del reloj del gateway. */
@@ -117,6 +142,10 @@ export class GatewayDePrueba {
   }
 
   async detener(): Promise<void> {
+    if (this.metricas) {
+      this.metricas.closeAllConnections();
+      await new Promise<void>((listo) => this.metricas!.close(() => listo()));
+    }
     await this.app.close();
   }
 }

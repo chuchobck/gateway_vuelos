@@ -1,6 +1,12 @@
 import { ContratoCore } from './contrato-core';
 import { RutaNormalizada } from './normalizar-ruta';
-import { coincide, ReglaRuta, RUTAS_BLOQUEADAS, TABLA_RUTAS } from './tabla-rutas';
+import {
+  coincide,
+  plantillaDePatron,
+  ReglaRuta,
+  RUTAS_BLOQUEADAS,
+  TABLA_RUTAS,
+} from './tabla-rutas';
 
 /** Lo que exige el borde para dejar pasar la petición. */
 export type SeguridadEfectiva =
@@ -11,7 +17,14 @@ export type SeguridadEfectiva =
 export type Decision =
   | { tipo: 'bloqueada' }
   | { tipo: 'desconocida' }
-  | { tipo: 'ruta'; regla: ReglaRuta; seguridad: SeguridadEfectiva; operacion?: string };
+  | {
+      tipo: 'ruta';
+      regla: ReglaRuta;
+      seguridad: SeguridadEfectiva;
+      /** La plantilla (`/flights/v1/bookings/{bookingId}`): la del contrato o la de la regla. */
+      plantilla: string;
+      operacion?: string;
+    };
 
 /** Lo que el contrato del core no declara (otro método, otra ruta): un token válido, sin scopes. */
 const SOLO_TOKEN: SeguridadEfectiva = { modo: 'token', alternativas: [[]] };
@@ -37,25 +50,34 @@ export class ResolverRutas {
     if (regla === undefined) return { tipo: 'desconocida' };
 
     const { seguridad } = regla;
-    if (seguridad.modo === 'publica') return { tipo: 'ruta', regla, seguridad };
+    const plantilla = plantillaDePatron(regla.patron);
+    if (seguridad.modo === 'publica') return { tipo: 'ruta', regla, seguridad, plantilla };
     if (seguridad.modo === 'token') {
       return {
         tipo: 'ruta',
         regla,
         seguridad: { modo: 'token', alternativas: [seguridad.scopes] },
+        plantilla,
       };
     }
 
     const operacion = this.contrato.buscar(metodo, ruta.clave);
-    if (operacion === undefined) return { tipo: 'ruta', regla, seguridad: SOLO_TOKEN };
+    if (operacion === undefined) return { tipo: 'ruta', regla, seguridad: SOLO_TOKEN, plantilla };
     const nombre = `${operacion.metodo} ${operacion.plantilla}`;
     if (operacion.publica) {
-      return { tipo: 'ruta', regla, seguridad: { modo: 'publica' }, operacion: nombre };
+      return {
+        tipo: 'ruta',
+        regla,
+        seguridad: { modo: 'publica' },
+        plantilla: operacion.plantilla,
+        operacion: nombre,
+      };
     }
     return {
       tipo: 'ruta',
       regla,
       seguridad: { modo: 'token', alternativas: operacion.alternativas },
+      plantilla: operacion.plantilla,
       operacion: nombre,
     };
   }
