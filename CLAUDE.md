@@ -9,7 +9,8 @@ fase 6a). Node 22 + TypeScript estricto + Fastify 5, **sin Nest**. Es la única 
 enruta a core (`backend_vuelos`), bff (`bff_vuelos`), identity (`identity_vuelos`) y notifier
 (`notifier_vuelos`), aplica la seguridad en el borde y esconde lo interno. Sin lógica de negocio ni
 base de datos. El plan y las decisiones están en `docs/PLAN.md`; las rutas, en `docs/RUTAS.md`; el
-despliegue, en `docs/DEPLOY.md`; la verificación local, en `docs/E2E-LOCAL.md`.
+despliegue, en `docs/DEPLOY.md`; la verificación local, en `docs/E2E-LOCAL.md`; el estándar de
+observabilidad de los cinco servicios (fase 7a), en `docs/OBSERVABILIDAD.md`.
 
 ## Alcance
 
@@ -38,6 +39,10 @@ despliegue, en `docs/DEPLOY.md`; la verificación local, en `docs/E2E-LOCAL.md`.
   `verificador-jwks.ts`) y `autorizar.ts`.
 - `src/borde/`: IP real, limitador y CORS. `src/proxy/`: cabeceras y el cliente `node:http`.
   `src/salud/`.
+- `src/observabilidad/`: trazas (OpenTelemetry) y métricas (prom-client), pensado para copiarse a
+  los otros servicios: solo `fastify.ts` depende de un framework (ver su README). Las métricas
+  propias del borde están en `src/borde/metricas-borde.ts`.
+- `observabilidad/`: Jaeger y Prometheus locales (docker-compose) y las consultas PromQL.
 - `src/app.ts` arma todo en una ruta comodín; `src/main.ts` arranca. `src/cli/listar-rutas.ts` es
   `npm run rutas:listar`.
 - `contracts/vuelos-openapi.yaml`: copia del contrato del core. **No se edita a mano**:
@@ -48,8 +53,8 @@ despliegue, en `docs/DEPLOY.md`; la verificación local, en `docs/E2E-LOCAL.md`.
 - Ninguna regla reescribe la ruta: cada servicio conserva su prefijo.
 - Se normaliza ANTES de decidir. Lo ambiguo se rechaza con 400, no se arregla. Se reenvía la ruta
   canónica que se decidió, nunca la cruda.
-- `/internal/**` se evalúa antes que la tabla y responde igual que una ruta desconocida (404). Nunca
-  se agrega una regla que lleve a `/internal`.
+- `/internal/**` y `/metrics` se evalúan antes que la tabla y responden igual que una ruta
+  desconocida (404). Nunca se agrega una regla que lleve a ellos.
 - La seguridad de `/flights/v1/**` sale del OpenAPI del core. Lo que el contrato no declara exige un
   token válido. Una regla manual nueva lleva su `nota` y va a `docs/RUTAS.md`.
 - Si `contrato:sync` cambia los scopes, `test/contrato.spec.ts` falla a propósito: se revisa el
@@ -63,9 +68,10 @@ despliegue, en `docs/DEPLOY.md`; la verificación local, en `docs/E2E-LOCAL.md`.
 - Ruta pública: el token no se mira. Si es inválido, igual pasa sin tocar y el servicio decide.
 - Errores del borde: ProblemDetails con la forma del contrato del core (sin campos extra) y siempre
   `X-Request-Id`. 401 con `WWW-Authenticate: Bearer`; 403 `insufficient_scope`.
-- Nunca al log ni a una respuesta: `Authorization`, tokens, la query, cuerpos, URLs internas ni
-  mensajes de error de red (solo su código). La línea de acceso lleva requestId, método, ruta sin
-  query, upstream, status y ms. `test/escaneo.spec.ts` lo comprueba.
+- Nunca al log, a un span, a una métrica ni a una respuesta: `Authorization`, tokens, la query,
+  cuerpos, URLs internas ni mensajes de error de red (solo su código). La línea de acceso lleva
+  requestId, traceId, spanId, método, plantilla de la ruta, upstream, status y ms.
+  `test/escaneo.spec.ts` y `test/trazas.spec.ts` lo comprueban.
 - La IP del cliente sale de `ipCliente()` con `TRUST_PROXY_HOPS`. Nunca se confía a ciegas en
   `X-Forwarded-For`. Hacia los servicios va un solo `X-Forwarded-For` con la IP real.
 - CORS solo en el gateway: los `Access-Control-*` del upstream se borran. Nunca `*` ni credenciales.
@@ -73,6 +79,22 @@ despliegue, en `docs/DEPLOY.md`; la verificación local, en `docs/E2E-LOCAL.md`.
 - Un vencimiento (copia del JWKS, ventana del límite) se decide con la hora del `Reloj`
   (`src/common/reloj.ts`), no con `Date.now()`: las pruebas lo adelantan. Los plazos de red usan
   temporizadores reales.
+
+## Observabilidad
+
+- El estándar es `docs/OBSERVABILIDAD.md`: un cambio de nombres, etiquetas, atributos o propagación
+  se hace allí primero, porque lo copian los otros cuatro servicios.
+- El SDK de trazas siempre arranca; el exportador, solo con `OTEL_EXPORTER_OTLP_ENDPOINT`. Una
+  petición nunca espera al recolector: solo encola su span.
+- El gateway es la raíz: el `traceparent` del cliente no se continúa (salvo
+  `TRACE_TRUST_INCOMING=true`) ni se reenvía; hacia cada upstream va el del span cliente.
+- Spans manuales, sin instrumentaciones automáticas, con atributos de `ATRIBUTOS_PERMITIDOS` (los
+  pone `filtrarAtributos`). Un error lleva `error.type` de la lista cerrada, nunca un mensaje.
+- `route` (etiqueta, `http.route`, nombre del span y línea de acceso) es siempre la plantilla o
+  `__unmatched__`, nunca la ruta pedida: ni ids, ni correos, ni IPs en spans, métricas o logs.
+- Las métricas van en `METRICS_PORT`, nunca en el puerto público.
+- Las pruebas de trazas usan el recolector falso (`test/utils/recolector-otlp.ts`) y miran el
+  JSON que de verdad sale.
 
 ## Proxy
 
