@@ -35,7 +35,8 @@ COPY contracts ./contracts
 # Sin privilegios: el usuario node de la imagen oficial (uid 1000). Nada en /app es suyo, así
 # que el proceso no puede reescribir su propio código ni el contrato.
 USER node
-EXPOSE 8080
+# 8080 es el público (ingress); 9464 son las métricas (METRICS_PORT): solo la red interna
+EXPOSE 8080 9464
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:' + (process.env.PORT || 8080) + '/health').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
