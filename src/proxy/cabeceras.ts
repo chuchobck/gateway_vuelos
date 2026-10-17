@@ -1,4 +1,5 @@
 import { IncomingHttpHeaders, OutgoingHttpHeaders } from 'node:http';
+import { tracestateAcotado } from '../observabilidad/traceparent';
 
 /** Hop-by-hop (RFC 9110, 7.6.1): valen para una conexión, no se reenvían. */
 const HOP_BY_HOP = new Set([
@@ -23,6 +24,9 @@ const DEL_CLIENTE_QUE_NO_PASAN = new Set([
   'x-real-ip',
   'x-request-id',
   'expect',
+  // La traza la abre el gateway: el traceparent del cliente nunca llega tal cual a un servicio
+  'traceparent',
+  'tracestate',
 ]);
 
 /** Lo que el upstream no le dice al cliente: quién es, ni su CORS (el del gateway es el único). */
@@ -47,13 +51,16 @@ export interface DatosReenvio {
   hostPublico: string | undefined;
   /** El host:puerto del upstream, para Host. */
   hostUpstream: string;
+  /** El traceparent del span del gateway hacia este upstream (mismo trace-id, otro parent-id). */
+  traceparent: string;
 }
 
 /**
  * Cabeceras de la petición hacia el upstream: las del cliente tal cual (Authorization, Content-*,
- * Accept-*, Idempotency-Key, X-Device-Fingerprint, traceparent, tracestate, ETag condicionales...)
- * menos las hop-by-hop y las que dicen quién es el cliente, que el gateway escribe:
- * X-Forwarded-For (solo la IP real), X-Forwarded-Proto, X-Forwarded-Host y X-Request-Id.
+ * Accept-*, Idempotency-Key, X-Device-Fingerprint, ETag condicionales...) menos las hop-by-hop y
+ * las que dicen quién es el cliente o de qué traza viene, que el gateway escribe: X-Forwarded-For
+ * (solo la IP real), X-Forwarded-Proto, X-Forwarded-Host, X-Request-Id y traceparent (el de su
+ * span hacia ese upstream). tracestate pasa sin tocar, con su tope.
  * El gateway no inventa cabeceras de identidad (nada de X-User-*).
  */
 export function cabecerasHaciaUpstream(
@@ -73,6 +80,10 @@ export function cabecerasHaciaUpstream(
   salida['x-forwarded-proto'] = datos.esquema;
   if (datos.hostPublico !== undefined) salida['x-forwarded-host'] = datos.hostPublico;
   salida['x-request-id'] = datos.requestId;
+  salida.traceparent = datos.traceparent;
+  // tracestate pasa intacto si cabe en el tope de W3C; si no, se descarta entero
+  const tracestate = tracestateAcotado(recibidas.tracestate);
+  if (tracestate !== undefined) salida.tracestate = tracestate;
   return salida;
 }
 

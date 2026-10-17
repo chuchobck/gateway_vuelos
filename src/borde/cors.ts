@@ -23,7 +23,8 @@ export const CABECERAS_PERMITIDAS = [
   'tracestate',
 ];
 
-export const CABECERAS_EXPUESTAS = ['x-request-id', 'retry-after'];
+/** X-Trace-Id: para que el frontend muestre con qué traza reportar un problema. */
+export const CABECERAS_EXPUESTAS = ['x-request-id', 'x-trace-id', 'retry-after'];
 
 export const METODOS_PERMITIDOS = ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE'];
 

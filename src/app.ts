@@ -5,17 +5,23 @@ import Fastify, {
   FastifyServerOptions,
   LogController,
 } from 'fastify';
+import { SpanKind } from '@opentelemetry/api';
 import { IncomingMessage } from 'node:http';
 import { TLSSocket } from 'node:tls';
 import { Writable } from 'node:stream';
 import { Cors } from './borde/cors';
 import { ipCliente } from './borde/ip-cliente';
 import { Limitador } from './borde/limitador';
+import { MetricasBorde } from './borde/metricas-borde';
 import { CONTENT_TYPE_PROBLEMA, ErrorBorde } from './common/problema';
 import { Reloj } from './common/reloj';
 import { CABECERA_REQUEST_ID, requestIdDe } from './common/request-id';
 import { Configuracion, NombreUpstream, UPSTREAMS } from './config/entorno';
 import { cabecerasHaciaCliente, cabecerasHaciaUpstream, hostValido } from './proxy/cabeceras';
+import { filtrarAtributos } from './observabilidad/atributos';
+import { fijarRuta, instrumentarFastify, observar } from './observabilidad/fastify';
+import { Metricas } from './observabilidad/metricas';
+import { camposDeTraza, marcarError, traceparentDe, Trazas } from './observabilidad/trazas';
 import { ClienteUpstream, ErrorUpstream } from './proxy/cliente-upstream';
 import { ContratoCore } from './rutas/contrato-core';
 import { normalizarRuta } from './rutas/normalizar-ruta';
@@ -42,6 +48,10 @@ declare module 'fastify' {
   interface FastifyRequest {
     contexto: ContextoPeticion;
   }
+  interface FastifyInstance {
+    /** Trazas y métricas del gateway: main.ts arranca con ellas el servidor de /metrics. */
+    observabilidad: { trazas: Trazas; metricas: Metricas };
+  }
 }
 
 export interface OpcionesApp {
@@ -52,6 +62,8 @@ export interface OpcionesApp {
   tabla?: readonly ReglaRuta[];
   /** Solo pruebas: a dónde van los logs (una línea JSON por registro). */
   destinoLogs?: Writable;
+  /** Solo pruebas: cada cuánto sale un lote de spans al recolector (ms). */
+  esperaLoteMs?: number;
 }
 
 const NOT_FOUND = 'No route matches the request';
@@ -65,7 +77,11 @@ const NOT_FOUND = 'No route matches the request';
  *   5. salud del gateway, o: Content-Length sobre el tope de la ruta (413)
  *   6. seguridad de la ruta (401/403/503)
  *   7. reenvío en streaming (502 caído, 504 sin respuesta a tiempo)
- * y en onSend: X-Request-Id, CORS y cabeceras de seguridad en TODA respuesta.
+ * y en onSend: X-Request-Id, X-Trace-Id, CORS y cabeceras de seguridad en TODA respuesta.
+ *
+ * Observabilidad (docs/OBSERVABILIDAD.md): un span raíz por petición, activo durante todo su ciclo
+ * (los logs llevan su traceId y spanId), uno hijo por la verificación del token y uno por la
+ * llamada al upstream, cuyo traceparent viaja hacia él. Las métricas van en otro puerto.
  */
 export function construirApp(opciones: OpcionesApp): FastifyInstance {
   const { configuracion } = opciones;
@@ -90,6 +106,19 @@ export function construirApp(opciones: OpcionesApp): FastifyInstance {
     ]),
   ) as Record<NombreUpstream, ClienteUpstream>;
 
+  const { observabilidad } = configuracion;
+  const trazas = new Trazas({
+    servicio: observabilidad.servicio,
+    version: observabilidad.version,
+    entorno: observabilidad.entorno,
+    muestreo: observabilidad.muestreo,
+    confiarEntrante: observabilidad.confiarEntrante,
+    ...(observabilidad.endpointOtlp ? { endpointOtlp: observabilidad.endpointOtlp } : {}),
+    ...(opciones.esperaLoteMs ? { esperaLoteMs: opciones.esperaLoteMs } : {}),
+  });
+  const metricas = new Metricas(observabilidad);
+  const metricasBorde = new MetricasBorde(metricas);
+
   const app = Fastify({
     logger: opcionesLogger(configuracion.nivelLog, opciones.destinoLogs),
     // La línea de acceso la escribe el hook onResponse, sin URL con query ni cabeceras
@@ -104,7 +133,11 @@ export function construirApp(opciones: OpcionesApp): FastifyInstance {
     return503OnClosing: true,
     frameworkErrors: (error, peticion, respuesta) => {
       const problema = new ErrorBorde(400, 'The request path is ambiguous or malformed');
-      peticion.log.info({ status: 400, motivo: 'url-invalida', err: error }, 'acceso');
+      // Fastify la rechaza antes del gancho onRequest: aquí se abre su traza
+      const { contexto } = observar(trazas, peticion as unknown as FastifyRequest);
+      trazas.enContexto(contexto, () =>
+        peticion.log.info({ status: 400, motivo: 'url-invalida', err: error }, 'acceso'),
+      );
       void (respuesta as unknown as FastifyReply)
         .code(400)
         .header('content-type', CONTENT_TYPE_PROBLEMA)
@@ -125,6 +158,10 @@ export function construirApp(opciones: OpcionesApp): FastifyInstance {
     reloj,
     logger,
   );
+
+  app.decorate('observabilidad', { trazas, metricas });
+  // Antes que cualquier otro gancho: el span raíz queda activo para todos los que siguen
+  instrumentarFastify(app, trazas, metricas);
 
   // Ningún parser: el cuerpo queda sin leer en la petición y se reenvía tal cual, en streaming
   app.removeAllContentTypeParsers();
@@ -162,16 +199,21 @@ export function construirApp(opciones: OpcionesApp): FastifyInstance {
     const contexto = peticion.contexto;
     if (!contexto) return; // un error del framework antes de onRequest: ya se registró
     const ms = Number((process.hrtime.bigint() - contexto.inicio) / 1_000_000n);
-    peticion.log.info(
-      {
-        metodo: peticion.method,
-        ruta: contexto.ruta ?? '-',
-        upstream: contexto.upstream ?? null,
-        status: respuesta.statusCode,
-        ms,
-        ...(contexto.motivo ? { motivo: contexto.motivo } : {}),
-      },
-      'acceso',
+    // onResponse corre fuera del contexto de la petición: se vuelve a entrar para el traceId
+    const registrar = (trabajo: () => void) =>
+      peticion.observacion ? trazas.enContexto(peticion.observacion.contexto, trabajo) : trabajo();
+    registrar(() =>
+      peticion.log.info(
+        {
+          metodo: peticion.method,
+          ruta: contexto.ruta ?? '-',
+          upstream: contexto.upstream ?? null,
+          status: respuesta.statusCode,
+          ms,
+          ...(contexto.motivo ? { motivo: contexto.motivo } : {}),
+        },
+        'acceso',
+      ),
     );
   });
 
@@ -200,13 +242,16 @@ export function construirApp(opciones: OpcionesApp): FastifyInstance {
     }
     contexto.ruta = ruta.ruta;
 
+    const decision = resolver.decidir(peticion.method, ruta);
+    // La plantilla nombra el span y etiqueta las métricas; sin regla, queda __unmatched__
+    if (decision.tipo === 'ruta') fijarRuta(peticion, decision.plantilla);
+
     if (cors.esPreflight(peticion.method, peticion.headers)) {
       contexto.motivo = 'preflight';
-      limitar(limiteGlobal, `g:${contexto.ip}`, contexto);
+      limitar(limiteGlobal, `g:${contexto.ip}`, contexto, metricasBorde, 'global');
       return respuesta.code(204).headers(cors.preflight(peticion.headers.origin)).send();
     }
 
-    const decision = resolver.decidir(peticion.method, ruta);
     if (decision.tipo !== 'ruta') {
       // /internal/** y lo desconocido responden igual: no se revela qué existe detrás
       contexto.motivo = decision.tipo;
@@ -214,9 +259,23 @@ export function construirApp(opciones: OpcionesApp): FastifyInstance {
     }
     const { regla } = decision;
     contexto.upstream = regla.destino;
+    peticion.observacion?.span.setAttributes(
+      filtrarAtributos({
+        'quinde.upstream': regla.destino,
+        'quinde.auth.mode': decision.seguridad.modo,
+      }),
+    );
 
-    limitar(limiteGlobal, `g:${contexto.ip}`, contexto);
-    if (regla.limiteEstricto) limitar(limiteEstricto, `e:${regla.patron}:${contexto.ip}`, contexto);
+    limitar(limiteGlobal, `g:${contexto.ip}`, contexto, metricasBorde, 'global');
+    if (regla.limiteEstricto) {
+      limitar(
+        limiteEstricto,
+        `e:${regla.patron}:${contexto.ip}`,
+        contexto,
+        metricasBorde,
+        'estricto',
+      );
+    }
 
     if (regla.destino === 'gateway') {
       return responderSalud(peticion, respuesta, ruta.clave);
@@ -228,14 +287,45 @@ export function construirApp(opciones: OpcionesApp): FastifyInstance {
       throw new ErrorBorde(413, 'The request body is too large');
     }
 
+    // Un span por la verificación del token (solo si la ruta lo exige)
+    const spanAuth =
+      decision.seguridad.modo === 'token'
+        ? trazas.iniciar('auth.verify', SpanKind.INTERNAL, {
+            'quinde.auth.mode': 'token',
+            'quinde.request_id': peticion.id,
+          })
+        : undefined;
     try {
-      await autorizar(decision.seguridad, peticion.headers.authorization, verificador);
+      const verificar = () =>
+        autorizar(decision.seguridad, peticion.headers.authorization, verificador);
+      await (spanAuth ? trazas.conSpan(spanAuth, verificar) : verificar());
     } catch (error) {
-      if (error instanceof ErrorBorde) contexto.motivo = motivoDeSeguridad(error.status);
+      if (error instanceof ErrorBorde) {
+        contexto.motivo = motivoDeSeguridad(error.status);
+        const motivo = error.motivo ?? 'invalid_token';
+        metricasBorde.rechazosAuth.inc({ reason: motivo });
+        if (spanAuth) marcarError(spanAuth, motivo);
+      }
       throw error;
+    } finally {
+      spanAuth?.end();
     }
 
     const cliente = clientes[regla.destino];
+    // Un span por la llamada al upstream; su traceparent viaja hacia él
+    const metodo = peticion.method;
+    const spanUpstream = trazas.iniciar(`${metodo} ${decision.plantilla}`, SpanKind.CLIENT, {
+      'http.request.method': metodo,
+      'http.route': decision.plantilla,
+      'quinde.upstream': regla.destino,
+      'quinde.request_id': peticion.id,
+    });
+    const inicioUpstream = process.hrtime.bigint();
+    const terminarUpstream = (status: number | 'error') => {
+      const segundos = Number(process.hrtime.bigint() - inicioUpstream) / 1e9;
+      metricas.registrarCliente(regla.destino, metodo, status, segundos);
+      spanUpstream.end();
+    };
     const tieneCuerpo = declarado > 0 || peticion.headers['transfer-encoding'] !== undefined;
     let respuestaUpstream: IncomingMessage;
     try {
@@ -248,16 +338,30 @@ export function construirApp(opciones: OpcionesApp): FastifyInstance {
           esquema: esquemaDe(peticion, configuracion.saltosProxy),
           hostPublico: hostValido(peticion.headers.host),
           hostUpstream: cliente.host,
+          traceparent: traceparentDe(spanUpstream),
         }),
         cuerpo: tieneCuerpo ? peticion.raw : undefined,
         cuerpoMaximo: regla.cuerpoMaximo,
       });
     } catch (error) {
-      throw errorDeUpstream(error, contexto, peticion);
+      const errorBorde = errorDeUpstream(error, contexto, peticion);
+      const tipo = tipoDeFalloUpstream(error);
+      if (tipo !== undefined) {
+        metricasBorde.erroresUpstream.inc({ upstream: regla.destino, kind: tipo });
+        marcarError(spanUpstream, tipo);
+      }
+      terminarUpstream('error');
+      throw errorBorde;
     }
 
+    const statusUpstream = respuestaUpstream.statusCode ?? 502;
+    spanUpstream.setAttributes(filtrarAtributos({ 'http.response.status_code': statusUpstream }));
+    if (statusUpstream >= 500) marcarError(spanUpstream, String(statusUpstream));
+    // El span termina cuando termina el cuerpo (un PDF grande cuenta entero)
+    respuestaUpstream.once('close', () => terminarUpstream(statusUpstream));
+
     return respuesta
-      .code(respuestaUpstream.statusCode ?? 502)
+      .code(statusUpstream)
       .headers(cabecerasHaciaCliente(respuestaUpstream.headers))
       .send(respuestaUpstream);
   });
@@ -296,6 +400,8 @@ function opcionesLogger(nivel: string, destino?: Writable): FastifyServerOptions
   return {
     level: nivel,
     base: { servicio: 'gateway' },
+    // traceId y spanId del span activo en TODA línea escrita durante una petición
+    mixin: camposDeTraza,
     timestamp: () => `,"time":"${new Date().toISOString()}"`,
     serializers: {
       req: () => ({}),
@@ -310,10 +416,17 @@ function opcionesLogger(nivel: string, destino?: Writable): FastifyServerOptions
   };
 }
 
-function limitar(limitador: Limitador, clave: string, contexto: ContextoPeticion): void {
+function limitar(
+  limitador: Limitador,
+  clave: string,
+  contexto: ContextoPeticion,
+  metricasBorde: MetricasBorde,
+  politica: 'global' | 'estricto',
+): void {
   const { permitido, reintentarEnSegundos } = limitador.contar(clave);
   if (permitido) return;
   contexto.motivo = 'limite';
+  metricasBorde.limitadas.inc({ policy: politica });
   throw new ErrorBorde(429, 'Too many requests; retry later', {
     cabeceras: { 'Retry-After': String(reintentarEnSegundos) },
   });
@@ -358,6 +471,14 @@ function errorDeUpstream(
     return new ErrorBorde(504, 'The upstream service did not respond in time');
   }
   return new ErrorBorde(502, 'The upstream service is not available');
+}
+
+/** El tipo de fallo para métricas y spans: unavailable (502) o timeout (504); 413 no cuenta. */
+function tipoDeFalloUpstream(error: unknown): 'unavailable' | 'timeout' | undefined {
+  if (!(error instanceof ErrorUpstream)) return 'unavailable';
+  if (error.tipo === 'plazo') return 'timeout';
+  if (error.tipo === 'caido') return 'unavailable';
+  return undefined;
 }
 
 /**

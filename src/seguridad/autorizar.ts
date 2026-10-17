@@ -52,6 +52,7 @@ export async function autorizar(
   const token = coincidencia?.[1];
   if (token === undefined) {
     throw new ErrorBorde(401, 'A bearer access token is required', {
+      motivo: 'missing_token',
       cabeceras: { 'WWW-Authenticate': desafioBearer() },
     });
   }
@@ -66,12 +67,14 @@ export async function autorizar(
         'The identity service is not available to verify the access token; retry later',
         {
           codigo: 'AUTH_UNAVAILABLE',
+          motivo: 'jwks_unavailable',
           cabeceras: { 'Retry-After': String(error.reintentarEnSegundos) },
         },
       );
     }
     if (error instanceof TokenInvalidoError) {
       throw new ErrorBorde(401, error.message, {
+        motivo: error.motivo === 'expirado' ? 'expired_token' : 'invalid_token',
         cabeceras: { 'WWW-Authenticate': desafioBearer('invalid_token', error.message) },
       });
     }
@@ -86,6 +89,7 @@ export async function autorizar(
     const faltantes = requeridos.filter((s) => !identidad.scopes.includes(s));
     const detalle = `Missing required scopes: ${faltantes.join(' ')}`;
     throw new ErrorBorde(403, detalle, {
+      motivo: 'insufficient_scope',
       cabeceras: { 'WWW-Authenticate': desafioBearer('insufficient_scope', detalle, requeridos) },
     });
   }

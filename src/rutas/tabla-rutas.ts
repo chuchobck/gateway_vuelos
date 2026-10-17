@@ -38,11 +38,13 @@ export const CUERPO_100KB = 100 * 1024;
 const PUBLICA: Seguridad = { modo: 'publica' };
 
 /**
- * Lo que nunca se enruta, se evalúe antes que la tabla y pase lo que pase en ella: /internal/**
- * es la API interna del notifier (core → notifier). Responde 404, igual que una ruta que no
- * existe, sin tocar ningún upstream.
+ * Lo que nunca se enruta, se evalúe antes que la tabla y pase lo que pase en ella. Responde 404,
+ * igual que una ruta que no existe, sin tocar ningún upstream:
+ * - /internal/**: la API interna del notifier (core → notifier).
+ * - /metrics: las métricas van en su propio puerto (METRICS_PORT), que el ingress no expone; en el
+ *   puerto público no existen, ni las del gateway ni las de ningún servicio.
  */
-export const RUTAS_BLOQUEADAS: readonly string[] = ['/internal/**'];
+export const RUTAS_BLOQUEADAS: readonly string[] = ['/internal/**', '/metrics/**'];
 
 /**
  * La tabla de rutas del gateway: la primera regla que coincide decide. Ninguna reescribe la
@@ -188,4 +190,12 @@ export function coincide(patron: string, clave: string): boolean {
     if (parte !== '*' && parte !== segmento) return false;
   }
   return partes.length === segmentos.length;
+}
+
+/**
+ * La plantilla de una regla, para nombres de span y etiquetas de métricas: `*` es `{id}` y `**` se
+ * deja como está. Siempre de la tabla, nunca de la ruta pedida: la cardinalidad queda acotada.
+ */
+export function plantillaDePatron(patron: string): string {
+  return patron.replace(/\/\*(?=\/|$)/g, '/{id}');
 }

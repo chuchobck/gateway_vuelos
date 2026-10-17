@@ -1,5 +1,6 @@
 import { construirApp } from './app';
 import { ErrorEntorno, leerEntorno } from './config/entorno';
+import { servidorMetricas } from './observabilidad/metricas';
 
 /**
  * Arranque: el entorno se valida antes de nada (si falta algo, el proceso sale con 1 y dice qué
@@ -20,6 +21,18 @@ async function arrancar(): Promise<void> {
   }
 
   const app = construirApp({ configuracion });
+  const { observabilidad } = configuracion;
+
+  // /metrics en su propio puerto (el ingress solo expone PORT); 0 lo apaga
+  const metricas =
+    observabilidad.puertoMetricas > 0 ? servidorMetricas(app.observabilidad.metricas) : undefined;
+  if (metricas) {
+    app.addHook('onClose', async () => {
+      metricas.closeAllConnections();
+      await new Promise<void>((listo) => metricas.close(() => listo()));
+    });
+  }
+
   for (const senal of ['SIGTERM', 'SIGINT'] as const) {
     process.once(senal, () => {
       app.log.info(`${senal}: cerrando`);
@@ -28,12 +41,24 @@ async function arrancar(): Promise<void> {
   }
 
   await app.listen({ port: configuracion.puerto, host: configuracion.host });
+  if (metricas) {
+    await new Promise<void>((listo, fallo) => {
+      metricas.once('error', fallo);
+      metricas.listen(observabilidad.puertoMetricas, configuracion.host, () => listo());
+    });
+  }
   const destinos = Object.entries(configuracion.upstreams)
     .map(([nombre, { plazoMs }]) => `${nombre} (${plazoMs} ms)`)
     .join(', ');
   app.log.info(
     `Gateway en el puerto ${configuracion.puerto}; upstreams: ${destinos}; ` +
       `TRUST_PROXY_HOPS=${configuracion.saltosProxy}; ${configuracion.corsOrigenes.length} orígenes CORS`,
+  );
+  app.log.info(
+    `Observabilidad: ${observabilidad.servicio} ${observabilidad.version}, muestreo ` +
+      `${observabilidad.muestreo}, ${observabilidad.endpointOtlp ? 'exportando trazas por OTLP/HTTP' : 'sin exportar trazas'}, ` +
+      `traceparent entrante ${observabilidad.confiarEntrante ? 'de confianza' : 'ignorado'}, ` +
+      `métricas ${metricas ? `en el puerto ${observabilidad.puertoMetricas}` : 'apagadas'}`,
   );
 }
 
