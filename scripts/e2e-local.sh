@@ -96,7 +96,7 @@ detener() {
 
 puertos_libres() {
   local puerto ocupados=()
-  for puerto in 3000 3001 3002 4000 4010 8080 50051; do
+  for puerto in 3000 3001 3002 4000 4010 4318 8080 9464 50051; do
     (echo >"/dev/tcp/127.0.0.1/$puerto") 2>/dev/null && ocupados+=("$puerto")
   done
   if [[ ${#ocupados[@]} -gt 0 ]]; then
@@ -159,6 +159,12 @@ arrancar() {
     node "$GW_DIR/scripts/e2e/receptor.mjs" >"$LOGS/receptor.log" 2>&1 &
   echo $! >"$ESTADO/receptor.pid"
 
+  # En lugar de Jaeger (sin Docker): un recolector OTLP/HTTP falso que guarda cada span
+  : >"$ESTADO/spans.jsonl"
+  RECOLECTOR_PORT=4318 RECOLECTOR_ARCHIVO="$ESTADO/spans.jsonl" \
+    node "$GW_DIR/scripts/e2e/recolector-otlp.mjs" >"$LOGS/recolector.log" 2>&1 &
+  echo $! >"$ESTADO/recolector.pid"
+
   (cd "$IDENTITY" && exec env -i PATH="$PATH" NODE_ENV=development PORT=3001 \
     DATABASE_URL="$PG/identity_db?schema=identidad" JWT_ISSUER="$GW" \
     JWT_AUDIENCE=quinde-vuelos-api JWT_SIGNING_KEY="$JWT_SIGNING_KEY" TRUST_PROXY=1 \
@@ -197,6 +203,7 @@ arrancar() {
     UPSTREAM_CORE_URL=http://localhost:3000 UPSTREAM_BFF_URL=http://localhost:4000 \
     UPSTREAM_IDENTITY_URL=http://localhost:3001 UPSTREAM_NOTIFIER_URL=http://localhost:3002 \
     JWT_ISSUER="$GW" CORS_ORIGINS=http://localhost:5173 TRUST_PROXY_HOPS=0 \
+    OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318 METRICS_PORT=9464 \
     node dist/main.js) >"$LOGS/gateway.log" 2>&1 &
   echo $! >"$ESTADO/gateway.pid"
   esperar gateway "$GW/health"
@@ -363,9 +370,67 @@ recorrer() {
   linea_ip="$(grep "$id_ip" "$LOGS/core.log" | grep -m1 'HTTP' | sed 's/\x1b\[[0-9;]*m//g')"
   verificar 'ip que registró el core (TRUST_PROXY=1)' 'ip=127.0.0.1' "$(grep -o 'ip=[0-9a-f.:]*' <<<"$linea_ip")"
 
-  titulo '13. Ningún token completo en los logs de los seis procesos'
+  titulo '13. Métricas en el puerto aparte (9464)'
+  verificar 'GET /metrics en el puerto público' 404 "$(status_de "$(pedir GET /metrics)")"
+  local metricas
+  metricas="$(curl -s http://localhost:9464/metrics)"
+  local serie_reservas='http_server_requests_total{method="GET",route="/flights/v1/bookings",status="200"}'
+  local reservas_ok
+  reservas_ok="$(grep -F "$serie_reservas " <<<"$metricas" | awk '{print $2}')"
+  verificar 'GET /flights/v1/bookings 200 contadas (pasos 4, 11 y 12: 3 o más)' 'sí' \
+    "$([[ ${reservas_ok:-0} -ge 3 ]] && echo sí || echo "no (${reservas_ok:-0})")"
+  grep -E '^(http_server_requests_total|gateway_auth_rejections_total|gateway_rate_limited_total|gateway_upstream_errors_total|quinde_build_info)' <<<"$metricas" |
+    sed 's/^/  /'
+  echo '  cubetas de GET /flights/v1/bookings 200:'
+  grep -F 'http_server_request_duration_seconds_bucket{le=' <<<"$metricas" |
+    grep -F 'route="/flights/v1/bookings",status="200"' | sed 's/^/    /'
+  grep -E '^http_client_request_duration_seconds_count' <<<"$metricas" | sed 's/^/  /'
+  local sin_401
+  sin_401="$(grep -F 'gateway_auth_rejections_total{reason="missing_token"} ' <<<"$metricas" | awk '{print $2}')"
+  verificar 'rechazos missing_token (paso 4) contados' 'sí' "$([[ ${sin_401:-0} -ge 1 ]] && echo sí || echo no)"
+  local con_cubetas
+  con_cubetas="$(grep -c 'http_server_request_duration_seconds_bucket{le="60"' <<<"$metricas")"
+  verificar 'histograma con la cubeta de 60 s' 'sí' "$([[ $con_cubetas -gt 0 ]] && echo sí || echo no)"
+  local etiquetas_sensibles
+  etiquetas_sensibles="$(grep -v '^#' <<<"$metricas" | grep -cE "$reserva|$correo|@|[0-9a-f]{8}-[0-9a-f]{4}-" || true)"
+  verificar 'etiquetas con ids, correos o uuid' 0 "$etiquetas_sensibles"
+
+  titulo '14. Trazas del gateway en el recolector OTLP (en lugar de Jaeger)'
+  local id_traza traza_cab
+  id_traza="$(uuid)"
+  traza_cab="$(curl -s -D - -o /dev/null "$GW/flights/v1/bookings/$reserva" \
+    -H "authorization: Bearer $token" -H "x-request-id: $id_traza" \
+    -H 'traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01' |
+    tr -d '\r' | sed -n 's/^x-trace-id: //Ip')"
+  echo "  X-Trace-Id: $traza_cab"
+  verificar 'traza nueva (no la del cliente)' 'sí' \
+    "$([[ -n $traza_cab && $traza_cab != 4bf92f3577b34da6a3ce929d0e0e4736 ]] && echo sí || echo no)"
+  local spans=''
+  for _ in $(seq 1 30); do
+    spans="$(grep -F "\"traceId\":\"$traza_cab\"" "$ESTADO/spans.jsonl" || true)"
+    [[ $(grep -c . <<<"$spans") -ge 3 ]] && break
+    sleep 0.5
+  done
+  jq -c '{tipo, nombre, padre: (if .parentSpanId == "" then "-" else .parentSpanId end), spanId, atributos, estado: .estado.code}' <<<"$spans" | sed 's/^/  /'
+  head -n1 <<<"$spans" | jq -c '{tipoContenido, recurso}' | sed 's/^/  /'
+  local raiz
+  raiz="$(jq -r 'select(.tipo == 2) | .spanId' <<<"$spans")"
+  verificar 'span raíz SERVER con la plantilla' 'GET /flights/v1/bookings/{bookingId}' \
+    "$(jq -r 'select(.tipo == 2) | .nombre' <<<"$spans")"
+  verificar 'hijos de la raíz: auth.verify (INTERNAL) y el upstream (CLIENT)' '1 3' \
+    "$(jq -r --arg r "$raiz" 'select(.parentSpanId == $r) | .tipo' <<<"$spans" | sort | tr '\n' ' ' | sed 's/ $//')"
+  verificar 'service.name' 'quinde-gateway' "$(head -n1 <<<"$spans" | jq -r '.recurso["service.name"]')"
+  local linea_log
+  linea_log="$(grep -F "\"requestId\":\"$id_traza\"" "$LOGS/gateway.log" | grep -F '"msg":"acceso"')"
+  echo "  gateway: $linea_log"
+  verificar 'X-Trace-Id = traceId del log del gateway' "$traza_cab" "$(jq -r .traceId <<<"$linea_log")"
+  verificar 'spans con la reserva, el correo, Authorization o una IP' 0 \
+    "$(grep -cE "$reserva|$correo|[Aa]uthorization|Bearer|127\.0\.0\.1" "$ESTADO/spans.jsonl" || true)"
+  echo "  spans recibidos en total: $(grep -c . "$ESTADO/spans.jsonl")"
+
+  titulo '15. Ningún token completo en los logs de los seis procesos ni en los spans'
   local con_token=0
-  for archivo in "$LOGS"/*.log; do
+  for archivo in "$LOGS"/*.log "$ESTADO/spans.jsonl"; do
     if grep -qF "$token" "$archivo" || grep -qF "$admin_token" "$archivo"; then
       echo "  MAL  $(basename "$archivo") tiene un token"
       con_token=1
