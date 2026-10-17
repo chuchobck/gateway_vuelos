@@ -15,8 +15,9 @@ Para cada petición, en este orden:
 
 1. **Normalizar** la ruta (`src/rutas/normalizar-ruta.ts`). Si se puede leer de dos maneras, la
    respuesta es **400** y no se decide nada más.
-2. **`/internal/**`**: **404** sin tocar ningún upstream. Esto pasa antes que la tabla: aunque una
-   regla lo cubriera, `/internal` no se enruta.
+2. **`/internal/**` y `/metrics`**: **404** sin tocar ningún upstream. Esto pasa antes que la tabla:
+   aunque una regla los cubriera, no se enrutan. Las métricas van en su propio puerto
+   (`METRICS_PORT`), que el ingress no expone ([OBSERVABILIDAD.md](OBSERVABILIDAD.md)).
 3. **Primera regla que coincide**. `*` es un segmento; `**`, cero o más. La comparación es en
    minúsculas. Si ninguna coincide: **404**. Ahí caen también `/api/docs` de cada servicio y el
    gRPC del core, que no se exponen.
@@ -29,6 +30,11 @@ Para cada petición, en este orden:
      se niega por defecto.
 5. **Reenviar sin reescribir**: cada servicio conserva su prefijo.
 
+La plantilla de la regla (o la de la operación del contrato) nombra el span de la petición y etiqueta
+sus métricas y su línea de acceso: `*` se escribe `{id}` (`/flights/v1/webhooks/{id}`) y `**` se deja.
+Lo que no coincide con ninguna regla (404, bloqueada, ambigua) es `__unmatched__`. La ruta pedida no
+va nunca a un span, una métrica ni un log.
+
 Ninguna regla reescribe la ruta. Lo que se reenvía es la ruta canónica que se decidió: decodificada
 una vez, re-codificada y sin barra final. La query va tal cual.
 
@@ -39,6 +45,7 @@ Contrato del core: 1.5.0.0 (22 operaciones).
 | Ruta | Método | Upstream | Seguridad | Scopes |
 | --- | --- | --- | --- | --- |
 | `/internal/**` | `*` | `— (404)` | `bloqueada` |  |
+| `/metrics/**` | `*` | `— (404)` | `bloqueada` |  |
 | `/health` | `GET` | `gateway` | `publica` |  |
 | `/health/ready` | `GET` | `gateway` | `publica` |  |
 | `/health/upstreams` | `GET` | `gateway` | `publica` |  |
@@ -118,8 +125,8 @@ contrato declara. Una prueba lo compara: `test/contrato.spec.ts`.
 ## Errores del borde
 
 Todos son `application/problem+json`, con el mismo cuerpo que los ProblemDetails del contrato del
-core: `type`, `title`, `status`, `detail` y `code`. Siempre llevan `X-Request-Id`. El request id va
-en la cabecera y no en el cuerpo, porque el esquema del contrato no admite campos extra.
+core: `type`, `title`, `status`, `detail` y `code`. Siempre llevan `X-Request-Id` y `X-Trace-Id`.
+Los dos van en cabeceras y no en el cuerpo, porque el esquema del contrato no admite campos extra.
 
 | Status | `code` | Cuándo |
 | --- | --- | --- |
