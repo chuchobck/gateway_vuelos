@@ -21,6 +21,8 @@ const AUTORIZAR = 'src/seguridad/autorizar.ts';
 const CABECERAS = 'src/proxy/cabeceras.ts';
 const CLIENTE = 'src/proxy/cliente-upstream.ts';
 const REQUEST_ID = 'src/common/request-id.ts';
+const TRAZAS = 'src/observabilidad/trazas.ts';
+const GANCHO = 'src/observabilidad/fastify.ts';
 
 const RUTAS = 'test/rutas.spec.ts';
 const AUTH = 'test/auth.spec.ts';
@@ -28,6 +30,9 @@ const CABECERAS_PRUEBA = 'test/cabeceras.spec.ts';
 const LIMITES = 'test/limites.spec.ts';
 const FALLOS = 'test/fallos.spec.ts';
 const ESCANEO = 'test/escaneo.spec.ts';
+const TRAZAS_PRUEBA = 'test/trazas.spec.ts';
+const METRICAS_PRUEBA = 'test/metricas.spec.ts';
+const RESILIENCIA = 'test/resiliencia.spec.ts';
 
 /**
  * nombre, cambios por archivo [{ archivo, cambios: [buscar, reemplazar] }], prueba y filtro (-t)
@@ -159,8 +164,8 @@ const MUTACIONES = [
         archivo: APP,
         cambios: [
           [
-            "        ruta: contexto.ruta ?? '-',",
-            "        ruta: contexto.ruta ?? '-',\n        authorization: peticion.headers.authorization,",
+            '          ruta: peticion.observacion?.ruta ?? RUTA_SIN_PLANTILLA,',
+            '          ruta: peticion.observacion?.ruta ?? RUTA_SIN_PLANTILLA,\n          authorization: peticion.headers.authorization,',
           ],
         ],
       },
@@ -175,8 +180,12 @@ const MUTACIONES = [
         archivo: APP,
         cambios: [
           [
-            '    } catch (error) {\n      throw errorDeUpstream(error, contexto, peticion);\n    }',
-            "    } catch (error) {\n      try {\n        respuestaUpstream = await cliente.reenviar({ metodo: peticion.method, rutaYQuery: ruta.ruta, cabeceras: cabecerasHaciaUpstream(peticion.headers, { requestId: peticion.id, ipCliente: contexto.ip, esquema: 'http', hostPublico: undefined, hostUpstream: cliente.host }), cuerpo: undefined, cuerpoMaximo: regla.cuerpoMaximo });\n      } catch {\n        throw errorDeUpstream(error, contexto, peticion);\n      }\n    }",
+            '    } catch (error) {\n      const errorBorde = errorDeUpstream(error, contexto, peticion);',
+            "    } catch (primero) {\n      try {\n        respuestaUpstream = await cliente.reenviar({ metodo: peticion.method, rutaYQuery: ruta.ruta, cabeceras: cabecerasHaciaUpstream(peticion.headers, { requestId: peticion.id, ipCliente: contexto.ip, esquema: 'http', hostPublico: undefined, hostUpstream: cliente.host, traceparent: traceparentDe(spanUpstream) }), cuerpo: undefined, cuerpoMaximo: regla.cuerpoMaximo });\n      } catch {\n      const error = primero;\n      const errorBorde = errorDeUpstream(error, contexto, peticion);",
+          ],
+          [
+            "      terminarUpstream('error');\n      throw errorBorde;\n    }",
+            "      terminarUpstream('error');\n      throw errorBorde;\n      }\n    }",
           ],
         ],
       },
@@ -289,8 +298,100 @@ const MUTACIONES = [
     prueba: RUTAS,
     filtro: 'no cae en el core aunque venga en mayúsculas',
   },
+  // --- observabilidad (fase 7a) ----------------------------------------------------------------
+  {
+    nombre:
+      'romper-propagacion: hacia el upstream va el traceparent del cliente, no el del gateway',
+    archivos: [
+      {
+        archivo: APP,
+        cambios: [
+          [
+            '          traceparent: traceparentDe(spanUpstream),',
+            "          traceparent: String(peticion.headers.traceparent ?? ''),",
+          ],
+        ],
+      },
+    ],
+    prueba: TRAZAS_PRUEBA,
+    filtro: 'propagación',
+  },
+  {
+    nombre: 'ruta-cruda: la etiqueta route y el nombre del span son la ruta pedida',
+    archivos: [
+      {
+        archivo: APP,
+        cambios: [
+          [
+            "    if (decision.tipo === 'ruta') fijarRuta(peticion, decision.plantilla);",
+            '    fijarRuta(peticion, ruta.ruta);',
+          ],
+        ],
+      },
+    ],
+    prueba: METRICAS_PRUEBA,
+    filtro: '1000 rutas distintas',
+  },
+  {
+    nombre: 'confiar-siempre: el traceparent entrante se continúa sin TRACE_TRUST_INCOMING',
+    archivos: [
+      {
+        archivo: TRAZAS,
+        cambios: [['    if (!this.config.confiarEntrante) return ROOT_CONTEXT;\n', '']],
+      },
+    ],
+    prueba: TRAZAS_PRUEBA,
+    filtro: 'raíz nueva por defecto',
+  },
+  {
+    nombre: 'atributo-sensible: el span raíz lleva el Authorization y la URL con su query',
+    archivos: [
+      {
+        archivo: GANCHO,
+        cambios: [
+          [
+            '  const observacion: ObservacionPeticion = {',
+            "  span.setAttribute('http.request.header.authorization', String(peticion.headers.authorization));\n  span.setAttribute('url.full', String(peticion.raw.url));\n  const observacion: ObservacionPeticion = {",
+          ],
+        ],
+      },
+    ],
+    prueba: TRAZAS_PRUEBA,
+    filtro: 'ni los spans ni los logs',
+  },
+  {
+    nombre: 'metrics-publico: /metrics se responde en el puerto principal',
+    archivos: [
+      {
+        archivo: APP,
+        cambios: [
+          [
+            '    const decision = resolver.decidir(peticion.method, ruta);',
+            "    if (ruta.clave === '/metrics') return respuesta.send(await metricas.exponer());\n    const decision = resolver.decidir(peticion.method, ruta);",
+          ],
+        ],
+      },
+    ],
+    prueba: METRICAS_PRUEBA,
+    filtro: '/metrics en el puerto aparte',
+  },
+  {
+    nombre: 'exportador-bloquea: cada respuesta espera a que el recolector reciba los spans',
+    archivos: [
+      {
+        archivo: GANCHO,
+        cambios: [
+          [
+            '    const observacion = peticion.observacion;\n    if (observacion) respuesta.header(',
+            '    await (trazas as unknown as { proveedor: { forceFlush(): Promise<void> } }).proveedor.forceFlush();\n    const observacion = peticion.observacion;\n    if (observacion) respuesta.header(',
+          ],
+        ],
+      },
+    ],
+    prueba: RESILIENCIA,
+    filtro: 'recolector lento',
+  },
 ];
-
 const filtroNombre = process.argv[2];
 const elegidas = MUTACIONES.filter((m) => !filtroNombre || m.nombre.includes(filtroNombre));
 const resultados = [];

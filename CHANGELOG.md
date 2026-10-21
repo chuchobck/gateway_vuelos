@@ -3,6 +3,47 @@
 Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/); versiones con
 [SemVer](https://semver.org/lang/es/).
 
+## [Sin publicar] — fase 7a: observabilidad
+
+### Agregado
+
+- **Estándar de observabilidad** para los cinco servicios en `docs/OBSERVABILIDAD.md`: W3C Trace
+  Context, `service.name` por servicio, spans y atributos permitidos, logs con traceId, métricas
+  comunes y reglas de cardinalidad, y el contrato de propagación HTTP, gRPC, webhooks y la bandeja
+  del core.
+- **Módulo `src/observabilidad/`**, copiable a servicios Nest: solo `fastify.ts` depende de un
+  framework.
+  - Trazas con OpenTelemetry: spans manuales y exportador OTLP/HTTP opcional
+    (`OTEL_EXPORTER_OTLP_ENDPOINT`), con cola y plazo acotados y cierre con tope de 5 s.
+  - Métricas con prom-client.
+- **Trazas en el gateway**:
+  - Un span raíz por petición (`METHOD /plantilla`), uno por la verificación del token
+    (`auth.verify`) y uno por cada llamada a un upstream.
+  - El gateway abre una traza nueva aunque el cliente mande `traceparent`, salvo con
+    `TRACE_TRUST_INCOMING=true`. Un `traceparent` inválido se descarta sin error.
+  - Hacia cada upstream va un `traceparent` nuevo y `tracestate` intacto, con su tope.
+- **`X-Trace-Id`** en toda respuesta, expuesta por CORS.
+- **Logs**: `requestId`, `traceId` y `spanId` en toda línea escrita durante una petición.
+- **Métricas** en un puerto aparte (`METRICS_PORT`, 9464):
+  - `http_server_request_duration_seconds`, `http_server_requests_total` y
+    `http_client_request_duration_seconds`;
+  - `quinde_build_info` y las métricas por defecto del proceso;
+  - `gateway_rate_limited_total`, `gateway_auth_rejections_total` y
+    `gateway_upstream_errors_total`.
+- Variables: `OTEL_SERVICE_NAME`, `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_TRACES_SAMPLER_ARG`,
+  `TRACE_TRUST_INCOMING` y `METRICS_PORT`.
+- `observabilidad/`: `docker-compose.yml` con Jaeger y Prometheus, `prometheus.yml` y
+  `CONSULTAS.md` con PromQL (sin verificar: no había Docker).
+- **Pruebas**: 404 en 14 suites, con un recolector OTLP falso. Seis mutaciones nuevas; 23 de 23
+  detectadas.
+
+### Cambiado
+
+- `/metrics` está bloqueado en el puerto público, como `/internal`.
+- El `traceparent` del cliente ya no pasa tal cual al upstream: el gateway lo reescribe.
+- La línea de acceso registra la **plantilla** de la ruta (o `__unmatched__`) en lugar de la ruta
+  canónica, que podía traer un id de reserva o un correo.
+
 ## [0.1.0] - 2026-10-16
 
 Primera versión (Reto 2, fase 6a): la puerta única de la arquitectura.

@@ -30,6 +30,7 @@ comprobar '/internal/v1/events nunca se enruta' 404 -X POST -H 'content-type: ap
 comprobar '/internal codificado' 404 "$BASE/%69nternal/v1/events"
 comprobar 'ruta ambigua (..)' 400 "$BASE/flights/v1/%2e%2e/internal/v1/events"
 comprobar 'ruta desconocida' 404 "$BASE/api/docs"
+comprobar '/metrics no está en el puerto público' 404 "$BASE/metrics"
 comprobar 'ruta protegida sin token' 401 "$BASE/flights/v1/bookings"
 comprobar 'token inválido en ruta protegida' 401 -H 'authorization: Bearer x.y.z' "$BASE/flights/v1/bookings"
 grande=$(mktemp)
@@ -39,10 +40,12 @@ comprobar 'cuerpo de más de 100 kB' 413 -X POST -H 'content-type: application/j
 comprobar 'preflight' 204 -X OPTIONS -H 'origin: https://evil.example' -H 'access-control-request-method: POST' "$BASE/graphql"
 
 cabeceras=$(curl -s -D - -o /dev/null "$BASE/health")
-if grep -qi '^x-request-id: [0-9a-f-]\{36\}' <<<"$cabeceras" && grep -qi '^x-content-type-options: nosniff' <<<"$cabeceras"; then
-  echo 'ok   X-Request-Id y nosniff'
+if grep -qi '^x-request-id: [0-9a-f-]\{36\}' <<<"$cabeceras" &&
+  grep -qi '^x-trace-id: [0-9a-f]\{32\}' <<<"$cabeceras" &&
+  grep -qi '^x-content-type-options: nosniff' <<<"$cabeceras"; then
+  echo 'ok   X-Request-Id, X-Trace-Id y nosniff'
 else
-  echo 'MAL  faltan X-Request-Id o nosniff'
+  echo 'MAL  faltan X-Request-Id, X-Trace-Id o nosniff'
   fallos=$((fallos + 1))
 fi
 if grep -qi '^x-powered-by\|^server:' <<<"$cabeceras"; then

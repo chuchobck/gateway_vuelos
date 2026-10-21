@@ -73,6 +73,8 @@ jobs:
           done
           status=0
           bash scripts/smoke.sh http://127.0.0.1:8080 || status=$?
+          # Las métricas, en su puerto aparte (METRICS_PORT=9464 por defecto)
+          curl -fsS http://127.0.0.1:9464/metrics | grep -q '^quinde_build_info{' || status=1
           kill "$PID" 2>/dev/null || true
           [ "$status" -eq 0 ] || { echo '--- gateway.log'; cat gateway.log; }
           exit "$status"
@@ -108,7 +110,7 @@ jobs:
         run: |
           test "$(docker run --rm --entrypoint id quinde-gateway:ci -u)" = "1000"
           docker run --rm --entrypoint sh quinde-gateway:ci -c 'test -f contracts/vuelos-openapi.yaml'
-          docker run -d --name gw -p 8080:8080 \
+          docker run -d --name gw -p 8080:8080 -p 9464:9464 \
             -e UPSTREAM_CORE_URL=http://127.0.0.1:9 -e UPSTREAM_BFF_URL=http://127.0.0.1:9 \
             -e UPSTREAM_IDENTITY_URL=http://127.0.0.1:9 -e UPSTREAM_NOTIFIER_URL=http://127.0.0.1:9 \
             -e JWT_ISSUER=https://gateway.quinde.example quinde-gateway:ci
@@ -117,4 +119,6 @@ jobs:
             sleep 1
           done
           curl -fsS http://127.0.0.1:8080/health/ready
+          curl -fsS http://127.0.0.1:9464/metrics | grep '^quinde_build_info{'
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/metrics)" = "404"
           docker rm -f gw

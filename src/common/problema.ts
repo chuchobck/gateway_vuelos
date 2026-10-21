@@ -30,7 +30,12 @@ export class ErrorBorde extends Error {
   constructor(
     readonly status: number,
     readonly detalle: string,
-    readonly opciones: { codigo?: CodigoError; cabeceras?: Record<string, string> } = {},
+    readonly opciones: {
+      codigo?: CodigoError;
+      cabeceras?: Record<string, string>;
+      /** Por qué, de una lista cerrada (missing_token, insufficient_scope...): métricas y spans. */
+      motivo?: string;
+    } = {},
   ) {
     super(detalle);
     this.name = 'ErrorBorde';
@@ -40,6 +45,10 @@ export class ErrorBorde extends Error {
     return (
       this.opciones.codigo ?? (this.status === 429 ? 'RATE_LIMIT_EXCEEDED' : 'VALIDATION_FAILED')
     );
+  }
+
+  get motivo(): string | undefined {
+    return this.opciones.motivo;
   }
 
   get cabeceras(): Record<string, string> {

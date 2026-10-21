@@ -1,0 +1,35 @@
+# Observabilidad local de Quinde: Jaeger (trazas) y Prometheus (métricas).
+#
+#   docker compose -f observabilidad/docker-compose.yml up -d
+#   Jaeger:     http://localhost:16686   (recibe OTLP/HTTP en http://localhost:4318)
+#   Prometheus: http://localhost:9090    (raspa los cinco servicios, ver prometheus.yml)
+#
+# Los servicios corren en el host (scripts/e2e-local.sh) con:
+#   OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
+#   METRICS_PORT: gateway 9464, bff 9465, core 9466, identity 9467, notifier 9468
+#
+# NO VERIFICADO: la sesión de la fase 7a no tenía Docker. Lo verificado es el formato de lo que
+# emite el gateway (OTLP/HTTP en JSON contra un recolector falso y el texto de /metrics).
+services:
+  jaeger:
+    image: jaegertracing/all-in-one:1.62.0
+    environment:
+      COLLECTOR_OTLP_ENABLED: 'true'
+    ports:
+      - '16686:16686' # interfaz
+      - '4318:4318' # OTLP/HTTP
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=7d
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - '9090:9090'
+    # Los servicios corren en el host, no en esta red
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
+    restart: unless-stopped
