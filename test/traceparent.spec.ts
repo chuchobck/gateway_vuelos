@@ -90,6 +90,37 @@ describe('atributos y plantillas', () => {
     expect(filtrarAtributos({ 'error.type': 'timeout' })).toEqual({ 'error.type': 'timeout' });
   });
 
+  it('rpc.* y graphql.operation.type pasan solo con un valor de su forma (fases 7b y 7c)', () => {
+    expect(
+      filtrarAtributos({
+        'rpc.system': 'grpc',
+        'rpc.service': 'quinde.flights.v1.FlightsService',
+        'rpc.method': 'SearchFlights',
+        'rpc.grpc.status_code': 14,
+        'graphql.operation.type': 'query',
+        'quinde.upstream': 'payments',
+      }),
+    ).toEqual({
+      'rpc.system': 'grpc',
+      'rpc.service': 'quinde.flights.v1.FlightsService',
+      'rpc.method': 'SearchFlights',
+      'rpc.grpc.status_code': 14,
+      'graphql.operation.type': 'query',
+      'quinde.upstream': 'payments',
+    });
+    expect(
+      filtrarAtributos({
+        'rpc.system': 'http',
+        'rpc.service': 'flights service; drop',
+        'rpc.method': 'search flights for ana@example.com',
+        'rpc.grpc.status_code': 17,
+        'graphql.operation.type': '{ searchFlights }',
+        // Su conjunto cerrado es el esquema de cada BFF: lo valida su propio filtro
+        'graphql.root_fields': 'searchFlights',
+      }),
+    ).toEqual({});
+  });
+
   it('métodos fuera de la lista son _OTHER', () => {
     expect(metodoNormalizado('GET')).toBe('GET');
     expect(metodoNormalizado('PROPFIND')).toBe('_OTHER');

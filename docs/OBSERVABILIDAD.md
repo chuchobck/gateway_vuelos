@@ -109,11 +109,29 @@ Cada servicio abre:
 | `http.request.method` | El método, de la lista conocida, o `_OTHER` |
 | `http.route` | La **plantilla**, o `__unmatched__` |
 | `http.response.status_code` | El status |
-| `quinde.upstream` | `core`, `bff`, `identity` o `notifier` |
+| `quinde.upstream` | `core`, `bff`, `identity`, `notifier` o `payments` (la Payment API, a la que llama el core) |
 | `quinde.auth.mode` | `publica` o `token` |
 | `quinde.request_id` | El X-Request-Id |
 | `quinde.correlation_id` | El X-Correlation-Id (sección 7). Solo en spans y logs, **nunca** como etiqueta de una métrica |
 | `error.type` | Uno de una lista cerrada: `timeout`, `unavailable`, `invalid_token`, `missing_token`, `expired_token`, `insufficient_scope`, `jwks_unavailable`, `500` a `504` |
+| `rpc.system` | `grpc` (span de una llamada gRPC: SERVER en el core, CLIENT en el BFF) |
+| `rpc.service` | El servicio del proto: `quinde.flights.v1.FlightsService`. Nunca de la petición |
+| `rpc.method` | La RPC del proto: `SearchFlights`, `GetSeatMap`, `GetFlightStatus` |
+| `rpc.grpc.status_code` | El código gRPC, de 0 a 16 |
+| `graphql.operation.type` | `query`, `mutation` o `subscription` (el span INTERNAL de una operación del BFF) |
+
+`filtrarAtributos` valida también el **valor** de `error.type`, `rpc.*` y `graphql.operation.type`: un
+texto con otra forma se descarta.
+
+**Atributos propios de un servicio**, sumados a los de arriba con su propio filtro y su conjunto
+cerrado de valores:
+
+| Servicio | Atributo | Valores |
+| --- | --- | --- |
+| bff | `graphql.root_fields` | Los campos raíz de su esquema que pide la operación (`searchFlights,seatMap`); otro nombre, un alias o un campo inventado es `__other__` (`src/telemetria/atributos-bff.ts`). No va en la lista común porque su conjunto cerrado es el esquema de cada BFF |
+
+Un servicio que necesite otro atributo lo propone aquí primero (como el core con `rpc.*` en la 7c y el
+BFF con `graphql.*` en la 7b): mientras no esté en esta tabla, es una divergencia anotada en su README.
 
 **Prohibido en spans, logs y métricas:**
 
@@ -169,7 +187,7 @@ existe: el gateway lo bloquea como `/internal`.
 | --- | --- | --- |
 | `http_server_request_duration_seconds` | histograma | `method`, `route`, `status` |
 | `http_server_requests_total` | contador | `method`, `route`, `status` |
-| `http_client_request_duration_seconds` | histograma | `upstream`, `method`, `status` (código o `error`) |
+| `http_client_request_duration_seconds` | histograma | `upstream` (`core`, `bff`, `identity`, `notifier`, `payments`), `method`, `status` (código o `error`) |
 | `quinde_build_info` | gauge (siempre 1) | `service`, `version`, `environment` |
 | por defecto de `prom-client` | varias | `process_*`, `nodejs_*` |
 
@@ -211,8 +229,12 @@ prefijo (`core_`, `notifier_`...) y las mismas reglas de cardinalidad.
    - llamar a `next()` dentro de `trazas.enContexto(...)`;
    - en `res.on('finish')`: plantilla = `req.route?.path` con el prefijo y la versión, o
      `__unmatched__`. Nombrar el span, cerrarlo y `metricas.registrarServidor(...)`.
-4. **gRPC (core):** en el interceptor de contexto gRPC, lo mismo con la metadata `traceparent`. La
-   plantilla es el nombre de la RPC: `flights.v1.FlightsService/SearchFlights`.
+4. **gRPC (core):** en el interceptor de contexto gRPC, lo mismo con la metadata `traceparent` (y
+   `x-correlation-id`, sección 7). El nombre del span es la RPC
+   (`quinde.flights.v1.FlightsService/SearchFlights`), con `rpc.system`, `rpc.service`, `rpc.method`
+   y, al cerrar, `rpc.grpc.status_code`. El BFF pone los mismos en su span CLIENT hacia el core.
+   **Payment API (core):** su span CLIENT lleva `quinde.upstream=payments` y la plantilla de la
+   ruta (`POST /payments/authorize`, `GET /payments/{reference}`).
 5. **Logger** (`LoggerPorPeticion` del core, el del BFF): agregar `traceId` y `spanId` de
    `camposDeTraza()` a cada línea.
 6. **Llamadas salientes:**
