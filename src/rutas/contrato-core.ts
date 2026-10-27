@@ -25,6 +25,8 @@ export interface OperacionContrato {
   alternativas: string[][];
   /** `security: []` o una alternativa sin esquemas (`- {}`): no hace falta token. */
   publica: boolean;
+  /** El `operationId` del contrato (createBooking...): la `operation` de la línea de acceso. */
+  operationId?: string;
 }
 
 export class ContratoCore {
@@ -55,7 +57,7 @@ export class ContratoCore {
     }
     for (const [ruta, item] of Object.entries(rutas)) {
       for (const metodo of METODOS) {
-        const operacion = item[metodo] as { security?: unknown } | undefined;
+        const operacion = item[metodo] as { security?: unknown; operationId?: unknown } | undefined;
         if (operacion === undefined) continue;
         const security = operacion.security ?? globales;
         const donde = `${metodo} ${ruta}`;
@@ -64,6 +66,9 @@ export class ContratoCore {
           plantilla: prefijo + ruta,
           alternativas: alternativasDe(security, donde),
           publica: esPublica(security),
+          ...(typeof operacion.operationId === 'string'
+            ? { operationId: operacion.operationId }
+            : {}),
         });
       }
     }

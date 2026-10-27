@@ -24,6 +24,7 @@ const REQUEST_ID = 'src/common/request-id.ts';
 const TRAZAS = 'src/observabilidad/trazas.ts';
 const GANCHO = 'src/observabilidad/fastify.ts';
 const TABLA = 'src/rutas/tabla-rutas.ts';
+const CORRELACION = 'src/common/correlation-id.ts';
 
 const RUTAS = 'test/rutas.spec.ts';
 const AUTH = 'test/auth.spec.ts';
@@ -36,6 +37,7 @@ const METRICAS_PRUEBA = 'test/metricas.spec.ts';
 const RESILIENCIA = 'test/resiliencia.spec.ts';
 const V2_RUTAS = 'test/v2-rutas.spec.ts';
 const PARTNER = 'test/usuario-partner.spec.ts';
+const CORRELACION_PRUEBA = 'test/correlacion.spec.ts';
 
 /**
  * nombre, cambios por archivo [{ archivo, cambios: [buscar, reemplazar] }], prueba y filtro (-t)
@@ -433,6 +435,38 @@ const MUTACIONES = [
     ],
     prueba: V2_RUTAS,
     filtro: 'no está en el contrato v2',
+  },
+  {
+    nombre: 'correlation-cambiado: el X-Correlation-Id recibido se "normaliza" a minúsculas',
+    archivos: [
+      {
+        archivo: CORRELACION,
+        cambios: [
+          [
+            'return esCorrelationIdValido(valor) ? valor : `corr-${randomUUID()}`;',
+            'return esCorrelationIdValido(valor) ? valor.toLowerCase() : `corr-${randomUUID()}`;',
+          ],
+        ],
+      },
+    ],
+    prueba: CORRELACION_PRUEBA,
+    filtro: 'se conserva sin cambios',
+  },
+  {
+    nombre: 'correlation-sin-error: un error no devuelve el X-Correlation-Id',
+    archivos: [
+      {
+        archivo: GANCHO,
+        cambios: [
+          [
+            '      respuesta.header(CABECERA_CORRELATION_ID, observacion.correlationId);',
+            '      if (respuesta.statusCode < 400) {\n        respuesta.header(CABECERA_CORRELATION_ID, observacion.correlationId);\n      }',
+          ],
+        ],
+      },
+    ],
+    prueba: CORRELACION_PRUEBA,
+    filtro: 'en los errores del borde',
   },
 ];
 const filtroNombre = process.argv[2];

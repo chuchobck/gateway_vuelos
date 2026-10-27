@@ -256,12 +256,16 @@ describe('trazas', () => {
         'quinde.upstream': 'core',
         'quinde.auth.mode': 'token',
         'quinde.request_id': respuesta.cabeceras['x-request-id'],
+        'quinde.correlation_id': respuesta.cabeceras['x-correlation-id'],
       });
       expect(auth.nombre).toBe('auth.verify');
       expect(auth.parentSpanId).toBe(raiz.spanId);
       expect(upstream.nombre).toBe('GET /flights/v1/bookings/{bookingId}');
       expect(upstream.parentSpanId).toBe(raiz.spanId);
       expect(upstream.atributos['quinde.upstream']).toBe('core');
+      expect(upstream.atributos['quinde.correlation_id']).toBe(
+        respuesta.cabeceras['x-correlation-id'],
+      );
       expect(upstream.atributos['http.response.status_code']).toBe(200);
 
       for (const span of spans) {

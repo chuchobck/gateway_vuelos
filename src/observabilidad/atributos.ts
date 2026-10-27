@@ -9,6 +9,8 @@
  * - `quinde.upstream`: core, bff, identity, notifier (solo el gateway).
  * - `quinde.auth.mode`: publica o token.
  * - `quinde.request_id`: el X-Request-Id (un uuid generado o validado por el servicio).
+ * - `quinde.correlation_id`: el X-Correlation-Id (validado o generado, sección 7). Solo en spans
+ *   y logs: NUNCA como etiqueta de una métrica (cardinalidad sin tope).
  * - `error.type`: un valor de una lista cerrada (timeout, unavailable, 5xx, invalid_token...).
  */
 export const ATRIBUTOS_PERMITIDOS = new Set([
@@ -18,6 +20,7 @@ export const ATRIBUTOS_PERMITIDOS = new Set([
   'quinde.upstream',
   'quinde.auth.mode',
   'quinde.request_id',
+  'quinde.correlation_id',
   'error.type',
 ]);
 

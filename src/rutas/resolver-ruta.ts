@@ -26,6 +26,7 @@ export type Decision =
       seguridad: SeguridadEfectiva;
       /** La plantilla (`/flights/v1/bookings/{bookingId}`): la del contrato o la de la regla. */
       plantilla: string;
+      /** El operationId del contrato (createBooking), si la ruta es una operación suya. */
       operacion?: string;
     };
 
@@ -73,14 +74,14 @@ export class ResolverRutas {
       if (seguridad.noDeclarada === 'negar') return { tipo: 'no-declarada' };
       return { tipo: 'ruta', regla, seguridad: SOLO_TOKEN, plantilla };
     }
-    const nombre = `${operacion.metodo} ${operacion.plantilla}`;
+    const nombre = operacion.operationId;
     if (operacion.publica) {
       return {
         tipo: 'ruta',
         regla,
         seguridad: { modo: 'publica' },
         plantilla: operacion.plantilla,
-        operacion: nombre,
+        ...(nombre ? { operacion: nombre } : {}),
       };
     }
     return {
@@ -88,7 +89,7 @@ export class ResolverRutas {
       regla,
       seguridad: { modo: 'token', alternativas: operacion.alternativas },
       plantilla: operacion.plantilla,
-      operacion: nombre,
+      ...(nombre ? { operacion: nombre } : {}),
     };
   }
 }

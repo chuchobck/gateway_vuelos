@@ -42,6 +42,12 @@ export interface ConfiguracionTrazas {
 /** Dónde va el request id dentro del contexto de la petición (lo lee `camposDeTraza`). */
 export const CLAVE_REQUEST_ID = createContextKey('quinde.request_id');
 
+/**
+ * Dónde va el X-Correlation-Id dentro del contexto de la petición (lo lee `camposDeTraza`): ya
+ * validado o generado por el servicio (docs/OBSERVABILIDAD.md, sección 7).
+ */
+export const CLAVE_CORRELATION_ID = createContextKey('quinde.correlation_id');
+
 /** Cola acotada: si el recolector no da abasto, los spans de más se descartan. */
 export const COLA_MAXIMA_SPANS = 2048;
 /** Plazo de un envío al recolector: más que esto y el lote se descarta. Nunca afecta a una petición. */
@@ -168,16 +174,23 @@ export function marcarError(span: Span, tipo: string): void {
 }
 
 /**
- * `requestId`, `traceId` y `spanId` de la petición en curso, para el `mixin` del logger: TODA
+ * `requestId`, `correlationId`, `traceId` y `spanId` de la petición en curso, para el `mixin` del logger: TODA
  * línea escrita dentro de una petición los lleva (también las de quien no recibe la petición, como
  * el verificador de tokens). Fuera de una petición (arranque, tareas), nada.
  */
-export function camposDeTraza(): { requestId?: string; traceId?: string; spanId?: string } {
+export function camposDeTraza(): {
+  requestId?: string;
+  correlationId?: string;
+  traceId?: string;
+  spanId?: string;
+} {
   const activo = context.active();
   const span = trace.getSpan(activo);
   const requestId = activo.getValue(CLAVE_REQUEST_ID);
+  const correlationId = activo.getValue(CLAVE_CORRELATION_ID);
   return {
     ...(typeof requestId === 'string' ? { requestId } : {}),
+    ...(typeof correlationId === 'string' ? { correlationId } : {}),
     ...(span ? { traceId: span.spanContext().traceId, spanId: span.spanContext().spanId } : {}),
   };
 }

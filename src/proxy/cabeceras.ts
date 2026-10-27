@@ -27,10 +27,18 @@ const DEL_CLIENTE_QUE_NO_PASAN = new Set([
   // La traza la abre el gateway: el traceparent del cliente nunca llega tal cual a un servicio
   'traceparent',
   'tracestate',
+  // El X-Correlation-Id lo escribe el gateway: el recibido si es válido (sin cambios), si no otro
+  'x-correlation-id',
 ]);
 
 /** Lo que el upstream no le dice al cliente: quién es, ni su CORS (el del gateway es el único). */
-const DEL_UPSTREAM_QUE_NO_PASAN = new Set(['server', 'x-powered-by', 'x-request-id']);
+const DEL_UPSTREAM_QUE_NO_PASAN = new Set([
+  'server',
+  'x-powered-by',
+  'x-request-id',
+  // El gateway pone el suyo (el mismo que mandó): un upstream no lo cambia hacia el cliente
+  'x-correlation-id',
+]);
 
 /** Las cabeceras que `Connection` declara hop-by-hop en este mensaje. */
 function nombradasEnConnection(cabeceras: IncomingHttpHeaders): Set<string> {
@@ -58,6 +66,8 @@ export interface DatosReenvio {
    * X-User-* (X-User-Id, X-User-Roles): el usuario final que el partner dice atender.
    */
   partner: boolean;
+  /** El X-Correlation-Id de la petición (validado o generado por el gateway). */
+  correlationId: string;
 }
 
 /** Las cabeceras de identidad del usuario final que solo un partner puede mandar (contrato v2). */
@@ -67,8 +77,9 @@ const PREFIJO_USUARIO = 'x-user-';
  * Cabeceras de la petición hacia el upstream: las del cliente tal cual (Authorization, Content-*,
  * Accept-*, Idempotency-Key, X-Device-Fingerprint, ETag condicionales...) menos las hop-by-hop y
  * las que dicen quién es el cliente o de qué traza viene, que el gateway escribe: X-Forwarded-For
- * (solo la IP real), X-Forwarded-Proto, X-Forwarded-Host, X-Request-Id y traceparent (el de su
- * span hacia ese upstream). tracestate pasa sin tocar, con su tope.
+ * (solo la IP real), X-Forwarded-Proto, X-Forwarded-Host, X-Request-Id, X-Correlation-Id (el
+ * recibido sin cambios si es válido, o el generado) y traceparent (el de su span hacia ese
+ * upstream). tracestate pasa sin tocar, con su tope.
  * El gateway no inventa cabeceras de identidad. Las X-User-* del cliente (X-User-Id, X-User-Roles
  * y cualquier otra) se BORRAN salvo que venga un token válido de partner: sin token, con uno de
  * persona y en toda ruta pública. Con partner pasan intactas y el servicio las valida.
@@ -91,6 +102,7 @@ export function cabecerasHaciaUpstream(
   salida['x-forwarded-proto'] = datos.esquema;
   if (datos.hostPublico !== undefined) salida['x-forwarded-host'] = datos.hostPublico;
   salida['x-request-id'] = datos.requestId;
+  salida['x-correlation-id'] = datos.correlationId;
   salida.traceparent = datos.traceparent;
   // tracestate pasa intacto si cabe en el tope de W3C; si no, se descarta entero
   const tracestate = tracestateAcotado(recibidas.tracestate);

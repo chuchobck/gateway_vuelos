@@ -211,7 +211,7 @@ describe('cabeceras', () => {
       expect(respuesta.cabeceras['access-control-allow-origin']).toBe(ORIGEN_PERMITIDO);
       expect(respuesta.cabeceras['access-control-allow-credentials']).toBeUndefined();
       expect(respuesta.cabeceras['access-control-expose-headers']).toBe(
-        'x-request-id, x-trace-id, retry-after',
+        'x-request-id, x-trace-id, retry-after, x-correlation-id, idempotent-replayed, location',
       );
       expect(respuesta.cabeceras.vary).toBe('Accept-Encoding, Origin');
     });

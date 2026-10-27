@@ -15,6 +15,7 @@ import { Limitador } from './borde/limitador';
 import { MetricasBorde } from './borde/metricas-borde';
 import { CONTENT_TYPE_PROBLEMA, ErrorBorde } from './common/problema';
 import { Reloj } from './common/reloj';
+import { CABECERA_CORRELATION_ID, correlacionDe } from './common/correlation-id';
 import { CABECERA_REQUEST_ID, requestIdDe } from './common/request-id';
 import { Configuracion, NombreUpstream, UPSTREAMS } from './config/entorno';
 import { cabecerasHaciaCliente, cabecerasHaciaUpstream, hostValido } from './proxy/cabeceras';
@@ -45,6 +46,8 @@ interface ContextoPeticion {
   upstream?: NombreUpstream | 'gateway';
   /** Por qué el borde respondió él mismo (bloqueada, desconocida, ambigua, token, scope...). */
   motivo?: string;
+  /** El operationId del contrato (v1 o v2), si la ruta es una operación suya. */
+  operacion?: string;
 }
 
 declare module 'fastify' {
@@ -126,6 +129,22 @@ export function construirApp(opciones: OpcionesApp): FastifyInstance {
     ...(opciones.esperaLoteMs ? { esperaLoteMs: opciones.esperaLoteMs } : {}),
   });
   const metricas = new Metricas(observabilidad);
+  /** Los campos de §6.4 de la línea de acceso; `service` es el service.name de las trazas. */
+  const camposDeAcceso = (
+    correlationId: string | undefined,
+    requestId: string,
+    operacion: string | null,
+    status: number,
+    latenciaMs: number,
+  ) => ({
+    timestamp: new Date().toISOString(),
+    service: observabilidad.servicio,
+    correlation_id: correlationId ?? null,
+    request_id: requestId,
+    operation: operacion,
+    status,
+    latency_ms: Math.round(latenciaMs * 10) / 10,
+  });
   const metricasBorde = new MetricasBorde(metricas);
 
   const app = Fastify({
@@ -149,7 +168,13 @@ export function construirApp(opciones: OpcionesApp): FastifyInstance {
       const observacion = observar(trazas, peticion as unknown as FastifyRequest);
       trazas.enContexto(observacion.contexto, () =>
         peticion.log.info(
-          { status: 400, ruta: RUTA_SIN_PLANTILLA, motivo: 'url-invalida', err: error },
+          {
+            ...camposDeAcceso(observacion.correlationId, peticion.id, null, 400, 0),
+            status: 400,
+            ruta: RUTA_SIN_PLANTILLA,
+            motivo: 'url-invalida',
+            err: error,
+          },
           'acceso',
         ),
       );
@@ -158,6 +183,7 @@ export function construirApp(opciones: OpcionesApp): FastifyInstance {
         .header('content-type', CONTENT_TYPE_PROBLEMA)
         .header('x-request-id', peticion.id)
         .header(CABECERA_TRACE_ID, observacion.span.spanContext().traceId)
+        .header(CABECERA_CORRELATION_ID, observacion.correlationId)
         .header('x-content-type-options', 'nosniff')
         .send(JSON.stringify(problema.problema()));
     },
@@ -214,13 +240,22 @@ export function construirApp(opciones: OpcionesApp): FastifyInstance {
   app.addHook('onResponse', async (peticion, respuesta) => {
     const contexto = peticion.contexto;
     if (!contexto) return; // un error del framework antes de onRequest: ya se registró
-    const ms = Number((process.hrtime.bigint() - contexto.inicio) / 1_000_000n);
+    const nanos = process.hrtime.bigint() - contexto.inicio;
+    const ms = Number(nanos / 1_000_000n);
     // onResponse corre fuera del contexto de la petición: se vuelve a entrar para el traceId
     const registrar = (trabajo: () => void) =>
       peticion.observacion ? trazas.enContexto(peticion.observacion.contexto, trabajo) : trabajo();
     registrar(() =>
       peticion.log.info(
         {
+          // Los campos del contrato v2 (§6, regla 4): los mismos en los cinco servicios
+          ...camposDeAcceso(
+            peticion.observacion?.correlationId,
+            peticion.id,
+            contexto.operacion ?? null,
+            respuesta.statusCode,
+            Number(nanos) / 1e6,
+          ),
           metodo: peticion.method,
           // La PLANTILLA, nunca la ruta pedida: una ruta cruda puede traer un id de reserva o un correo
           ruta: peticion.observacion?.ruta ?? RUTA_SIN_PLANTILLA,
@@ -260,7 +295,10 @@ export function construirApp(opciones: OpcionesApp): FastifyInstance {
 
     const decision = resolver.decidir(peticion.method, ruta);
     // La plantilla nombra el span y etiqueta las métricas; sin regla, queda __unmatched__
-    if (decision.tipo === 'ruta') fijarRuta(peticion, decision.plantilla);
+    if (decision.tipo === 'ruta') {
+      fijarRuta(peticion, decision.plantilla);
+      if (decision.operacion) contexto.operacion = decision.operacion;
+    }
 
     if (cors.esPreflight(peticion.method, peticion.headers)) {
       contexto.motivo = 'preflight';
@@ -339,6 +377,9 @@ export function construirApp(opciones: OpcionesApp): FastifyInstance {
       'http.route': decision.plantilla,
       'quinde.upstream': regla.destino,
       'quinde.request_id': peticion.id,
+      ...(peticion.observacion
+        ? { 'quinde.correlation_id': peticion.observacion.correlationId }
+        : {}),
     });
     const inicioUpstream = process.hrtime.bigint();
     const terminarUpstream = (status: number | 'error') => {
@@ -361,6 +402,7 @@ export function construirApp(opciones: OpcionesApp): FastifyInstance {
           traceparent: traceparentDe(spanUpstream),
           // Un token de partner trae client_id (identity no lo pone en los de personas)
           partner: identidad?.clienteId !== undefined,
+          correlationId: peticion.observacion?.correlationId ?? correlacionDe(undefined),
         }),
         cuerpo: tieneCuerpo ? peticion.raw : undefined,
         cuerpoMaximo: regla.cuerpoMaximo,

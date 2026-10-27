@@ -2,7 +2,8 @@ import { Context, Span, SpanKind, trace } from '@opentelemetry/api';
 import { FastifyInstance, FastifyRequest } from 'fastify';
 import { RUTA_SIN_PLANTILLA, metodoNormalizado } from './atributos';
 import { Metricas } from './metricas';
-import { CLAVE_REQUEST_ID, marcarError, Trazas } from './trazas';
+import { CABECERA_CORRELATION_ID, correlacionDe } from '../common/correlation-id';
+import { CLAVE_CORRELATION_ID, CLAVE_REQUEST_ID, marcarError, Trazas } from './trazas';
 
 /**
  * El único archivo del módulo atado a Fastify: abre el span raíz de cada petición, lo deja activo
@@ -16,6 +17,8 @@ export interface ObservacionPeticion {
   span: Span;
   contexto: Context;
   inicio: bigint;
+  /** El X-Correlation-Id de la petición: el recibido si es válido, si no uno generado. */
+  correlationId: string;
   /** La plantilla de la ruta, cuando la aplicación la conoce (si no, __unmatched__). */
   ruta?: string;
 }
@@ -36,6 +39,7 @@ export const CABECERA_TRACE_ID = 'x-trace-id';
 export function observar(trazas: Trazas, peticion: FastifyRequest): ObservacionPeticion {
   if (peticion.observacion) return peticion.observacion;
   const padre = trazas.contextoEntrante(peticion.headers.traceparent);
+  const correlationId = correlacionDe(peticion.headers[CABECERA_CORRELATION_ID]);
   // El nombre definitivo ("METHOD /plantilla") se pone al terminar, cuando se conoce la plantilla
   const span = trazas.iniciar(
     metodoNormalizado(peticion.method),
@@ -43,14 +47,19 @@ export function observar(trazas: Trazas, peticion: FastifyRequest): ObservacionP
     {
       'http.request.method': metodoNormalizado(peticion.method),
       'quinde.request_id': peticion.id,
+      'quinde.correlation_id': correlationId,
     },
     padre,
   );
   const observacion: ObservacionPeticion = {
     span,
-    // El request id viaja en el contexto: el logger lo agrega a cada línea (camposDeTraza)
-    contexto: trace.setSpan(padre, span).setValue(CLAVE_REQUEST_ID, peticion.id),
+    // El request id y el correlation id viajan en el contexto: el logger los agrega a cada línea
+    contexto: trace
+      .setSpan(padre, span)
+      .setValue(CLAVE_REQUEST_ID, peticion.id)
+      .setValue(CLAVE_CORRELATION_ID, correlationId),
     inicio: process.hrtime.bigint(),
+    correlationId,
   };
   peticion.observacion = observacion;
   return observacion;
@@ -78,7 +87,11 @@ export function instrumentarFastify(
 
   app.addHook('onSend', async (peticion, respuesta, cuerpo) => {
     const observacion = peticion.observacion;
-    if (observacion) respuesta.header(CABECERA_TRACE_ID, observacion.span.spanContext().traceId);
+    if (observacion) {
+      respuesta.header(CABECERA_TRACE_ID, observacion.span.spanContext().traceId);
+      // En TODA respuesta, también en los errores del borde (contrato v2, §6, regla 2)
+      respuesta.header(CABECERA_CORRELATION_ID, observacion.correlationId);
+    }
     return cuerpo;
   });
 
