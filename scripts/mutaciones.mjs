@@ -23,6 +23,7 @@ const CLIENTE = 'src/proxy/cliente-upstream.ts';
 const REQUEST_ID = 'src/common/request-id.ts';
 const TRAZAS = 'src/observabilidad/trazas.ts';
 const GANCHO = 'src/observabilidad/fastify.ts';
+const TABLA = 'src/rutas/tabla-rutas.ts';
 
 const RUTAS = 'test/rutas.spec.ts';
 const AUTH = 'test/auth.spec.ts';
@@ -33,6 +34,8 @@ const ESCANEO = 'test/escaneo.spec.ts';
 const TRAZAS_PRUEBA = 'test/trazas.spec.ts';
 const METRICAS_PRUEBA = 'test/metricas.spec.ts';
 const RESILIENCIA = 'test/resiliencia.spec.ts';
+const V2_RUTAS = 'test/v2-rutas.spec.ts';
+const PARTNER = 'test/usuario-partner.spec.ts';
 
 /**
  * nombre, cambios por archivo [{ archivo, cambios: [buscar, reemplazar] }], prueba y filtro (-t)
@@ -390,6 +393,46 @@ const MUTACIONES = [
     ],
     prueba: RESILIENCIA,
     filtro: 'recolector lento',
+  },
+  {
+    nombre: 'x-user-sin-partner: X-User-Id y X-User-Roles pasan con cualquier token o sin él',
+    archivos: [
+      {
+        archivo: CABECERAS,
+        cambios: [
+          ['    if (nombre.startsWith(PREFIJO_USUARIO) && !datos.partner) continue;\n', ''],
+        ],
+      },
+    ],
+    prueba: PARTNER,
+    filtro: 'se borran',
+  },
+  {
+    nombre: 'v2-sin-scopes: las rutas /api/v2 quedan públicas (sin el contrato v2)',
+    archivos: [
+      {
+        archivo: TABLA,
+        cambios: [
+          [
+            "const CONTRATO_V2: Seguridad = { modo: 'contrato', contrato: 'v2', noDeclarada: 'negar' };",
+            "const CONTRATO_V2: Seguridad = { modo: 'publica' };",
+          ],
+        ],
+      },
+    ],
+    prueba: V2_RUTAS,
+    filtro: 'sin token → 401',
+  },
+  {
+    nombre: 'v2-no-declarada-pasa: lo que el contrato v2 no declara llega al core con un token',
+    archivos: [
+      {
+        archivo: RESOLVER,
+        cambios: [["if (seguridad.noDeclarada === 'negar') return { tipo: 'no-declarada' };", '']],
+      },
+    ],
+    prueba: V2_RUTAS,
+    filtro: 'no está en el contrato v2',
   },
 ];
 const filtroNombre = process.argv[2];

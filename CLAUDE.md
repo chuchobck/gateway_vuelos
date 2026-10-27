@@ -17,7 +17,9 @@ observabilidad de los cinco servicios (fase 7a), en `docs/OBSERVABILIDAD.md`.
 - Solo el borde: rutas, normalización, token y scopes, CORS, límites, cabeceras y proxy. Nada que
   necesite estado de negocio.
 - Los servicios siguen validando todo. El gateway nunca es la única barrera ni le pasa identidad a
-  nadie: el `Authorization` se reenvía intacto y no hay `X-User-*`.
+  nadie: el `Authorization` se reenvía intacto y el gateway no escribe `X-User-*`. Las `X-User-*`
+  del cliente (`X-User-Id`, `X-User-Roles`) solo pasan con un token VÁLIDO de partner (claim
+  `client_id`); sin token, con uno de persona y en toda ruta pública se borran.
 - Desde este repo no se tocan los otros servicios ni los frontends: lo que necesitan va a
   `docs/PLAN.md` ("Lo que necesitan los otros repos").
 

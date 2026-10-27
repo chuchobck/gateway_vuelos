@@ -53,7 +53,15 @@ export interface DatosReenvio {
   hostUpstream: string;
   /** El traceparent del span del gateway hacia este upstream (mismo trace-id, otro parent-id). */
   traceparent: string;
+  /**
+   * ¿La petición trae un token VÁLIDO de partner (claim client_id)? Solo entonces pasan las
+   * X-User-* (X-User-Id, X-User-Roles): el usuario final que el partner dice atender.
+   */
+  partner: boolean;
 }
+
+/** Las cabeceras de identidad del usuario final que solo un partner puede mandar (contrato v2). */
+const PREFIJO_USUARIO = 'x-user-';
 
 /**
  * Cabeceras de la petición hacia el upstream: las del cliente tal cual (Authorization, Content-*,
@@ -61,7 +69,9 @@ export interface DatosReenvio {
  * las que dicen quién es el cliente o de qué traza viene, que el gateway escribe: X-Forwarded-For
  * (solo la IP real), X-Forwarded-Proto, X-Forwarded-Host, X-Request-Id y traceparent (el de su
  * span hacia ese upstream). tracestate pasa sin tocar, con su tope.
- * El gateway no inventa cabeceras de identidad (nada de X-User-*).
+ * El gateway no inventa cabeceras de identidad. Las X-User-* del cliente (X-User-Id, X-User-Roles
+ * y cualquier otra) se BORRAN salvo que venga un token válido de partner: sin token, con uno de
+ * persona y en toda ruta pública. Con partner pasan intactas y el servicio las valida.
  */
 export function cabecerasHaciaUpstream(
   recibidas: IncomingHttpHeaders,
@@ -73,6 +83,7 @@ export function cabecerasHaciaUpstream(
     if (valor === undefined) continue;
     if (HOP_BY_HOP.has(nombre) || conexion.has(nombre)) continue;
     if (DEL_CLIENTE_QUE_NO_PASAN.has(nombre) || nombre.startsWith('x-forwarded-')) continue;
+    if (nombre.startsWith(PREFIJO_USUARIO) && !datos.partner) continue;
     salida[nombre] = valor;
   }
   salida.host = datos.hostUpstream;

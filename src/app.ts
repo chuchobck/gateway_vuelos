@@ -36,7 +36,7 @@ import { saludDeUpstreams } from './salud/salud';
 import { autorizar } from './seguridad/autorizar';
 import { ClavesJwks } from './seguridad/claves-jwks';
 import { Registro } from './seguridad/registro';
-import { VerificadorJwks } from './seguridad/verificador-jwks';
+import { IdentidadToken, VerificadorJwks } from './seguridad/verificador-jwks';
 
 /** Lo que el gateway anota de cada petición para su línea de log de acceso. */
 interface ContextoPeticion {
@@ -313,10 +313,12 @@ export function construirApp(opciones: OpcionesApp): FastifyInstance {
             'quinde.request_id': peticion.id,
           })
         : undefined;
+    // La identidad del token, solo si la ruta lo exigió y es válido (en una pública: undefined)
+    let identidad: IdentidadToken | undefined;
     try {
       const verificar = () =>
         autorizar(decision.seguridad, peticion.headers.authorization, verificador);
-      await (spanAuth ? trazas.conSpan(spanAuth, verificar) : verificar());
+      identidad = await (spanAuth ? trazas.conSpan(spanAuth, verificar) : verificar());
     } catch (error) {
       if (error instanceof ErrorBorde) {
         contexto.motivo = motivoDeSeguridad(error.status);
@@ -357,6 +359,8 @@ export function construirApp(opciones: OpcionesApp): FastifyInstance {
           hostPublico: hostValido(peticion.headers.host),
           hostUpstream: cliente.host,
           traceparent: traceparentDe(spanUpstream),
+          // Un token de partner trae client_id (identity no lo pone en los de personas)
+          partner: identidad?.clienteId !== undefined,
         }),
         cuerpo: tieneCuerpo ? peticion.raw : undefined,
         cuerpoMaximo: regla.cuerpoMaximo,
