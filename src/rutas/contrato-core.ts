@@ -3,11 +3,13 @@ import { join } from 'node:path';
 import { parse } from 'yaml';
 
 /**
- * La copia del contrato del core (contracts/vuelos-openapi.yaml). No se edita a mano:
- * `npm run contrato:sync` la trae de main del core y `npm run contrato:check` la compara.
+ * Las copias de los contratos del core: v1 (contracts/vuelos-openapi.yaml, /flights/v1) y v2
+ * (contracts/vuelos-openapi-v2.yaml, /api/v2, el de Booking Prototipo). No se editan a mano:
+ * `npm run contrato:sync` las trae de main del core y `npm run contrato:check` las compara.
  * Desde dist/rutas y desde src/rutas, dos niveles arriba está la raíz del proyecto.
  */
 export const RUTA_CONTRATO = join(__dirname, '..', '..', 'contracts', 'vuelos-openapi.yaml');
+export const RUTA_CONTRATO_V2 = join(__dirname, '..', '..', 'contracts', 'vuelos-openapi-v2.yaml');
 
 const METODOS = ['get', 'put', 'post', 'delete', 'patch'] as const;
 
@@ -94,12 +96,15 @@ export class ContratoCore {
   }
 }
 
-/** `/flights/v1` de `servers[0].url` (https://api.booking-hub.com/flights/v1). */
+/**
+ * El prefijo de `servers[0].url`: `/flights/v1` de https://api.booking-hub.com/flights/v1, o
+ * `/api/v2` tal cual (el v2 la declara relativa: "detrás del gateway").
+ */
 function prefijoDe(documento: Record<string, unknown>): string {
   const servidores = documento.servers as { url?: unknown }[] | undefined;
   const url = servidores?.[0]?.url;
   if (typeof url !== 'string') throw new Error('El contrato del core no tiene servers');
-  const ruta = new URL(url).pathname.replace(/\/+$/, '');
+  const ruta = new URL(url, 'http://relativa.invalid').pathname.replace(/\/+$/, '');
   if (!/^\/[a-z0-9/-]+$/.test(ruta)) throw new Error('El prefijo de servers no es una ruta');
   return ruta;
 }

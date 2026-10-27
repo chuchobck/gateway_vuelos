@@ -28,8 +28,8 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
 
 COPY --from=compilacion /app/dist ./dist
-# La copia del OpenAPI del core: de ahí salen los scopes al arrancar (y no levanta sin ella).
-# Se lee desde dist/rutas, dos niveles arriba: /app/contracts/vuelos-openapi.yaml
+# Las copias de los OpenAPI del core (v1 y v2): de ahí salen los scopes al arrancar (y no levanta
+# sin ellas). Se leen desde dist/rutas, dos niveles arriba: /app/contracts/vuelos-openapi*.yaml
 COPY contracts ./contracts
 
 # Sin privilegios: el usuario node de la imagen oficial (uid 1000). Nada en /app es suyo, así
