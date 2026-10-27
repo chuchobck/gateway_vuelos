@@ -1,7 +1,7 @@
 # Quinde · Gateway
 
-La puerta única de la arquitectura de vuelos Quinde (Reto 2 de Integración de Sistemas, PUCE, fase
-6a). Es la **única entrada pública**: enruta a los cuatro servicios, aplica la seguridad en el borde
+La puerta única de la arquitectura de vuelos Quinde (Reto 2 de Integración de Sistemas, PUCE, fases
+6a, 7a y G2). Es la **única entrada pública**: enruta a los cuatro servicios, aplica la seguridad en el borde
 y esconde lo interno. No tiene lógica de negocio ni base de datos, y los servicios siguen validando
 todo (defensa en profundidad).
 
@@ -9,19 +9,26 @@ todo (defensa en profundidad).
                  ┌──────────── gateway (público) ────────────┐
 navegador ──────▶│ normaliza → decide → limita → token/scopes │──▶ /graphql            → bff ──gRPC──▶ core
 apps, B2B        │ CORS · X-Request-Id · IP real · streaming  │──▶ /flights/v1/webhooks → notifier
-                 └────────────────────────────────────────────┘──▶ /flights/v1/**       → core
-                                                                ──▶ /identity/v1/**, /oauth2/token, /.well-known/** → identity
+Booking (v2)     │ X-Correlation-Id · X-User-* solo partner   │──▶ /flights/v1/**       → core
+                 └────────────────────────────────────────────┘──▶ /api/v2/vuelos/webhooks*, /eventos → notifier
+                                                                ──▶ /api/v2/vuelos/**   → core
+                                                                ──▶ /identity/v1/**, /oauth2/token, /api/v2/oauth2/token, /.well-known/** → identity
                     /internal/** → 404 (nunca se enruta)          core ──▶ notifier /internal/v1/events (red interna)
 ```
 
-- **Rutas**: una tabla declarativa, sin reescribir prefijos
-  ([`src/rutas/tabla-rutas.ts`](src/rutas/tabla-rutas.ts), [`docs/RUTAS.md`](docs/RUTAS.md),
-  `npm run rutas:listar`). Una ruta ambigua (`..`, `%2f`, `//`, doble codificación) es 400.
+- **Rutas**: una tabla declarativa, sin reescribir prefijos (salvo `/api/v2/oauth2/token` →
+  `/oauth2/token`) ([`src/rutas/tabla-rutas.ts`](src/rutas/tabla-rutas.ts),
+  [`docs/RUTAS.md`](docs/RUTAS.md), `npm run rutas:listar`). Una ruta ambigua (`..`, `%2f`, `//`, doble codificación) es 400.
   `/internal/**`, Swagger y el gRPC de los servicios no se exponen.
 - **Seguridad**: el verificador de la fase 4b/5a (RS256 fijo, `typ` at+jwt, `iss` y `aud` exactos,
   JWKS de identity). Hay rutas públicas, donde el `Authorization` pasa intacto y el servicio decide,
-  y rutas que exigen token con scopes. Los scopes del core se sacan al arrancar de la copia vendored
-  de su OpenAPI ([`contracts/vuelos-openapi.yaml`](contracts/vuelos-openapi.yaml)).
+  y rutas que exigen token con scopes. Los scopes del core se sacan al arrancar de las copias
+  vendored de sus dos OpenAPI: v1 ([`contracts/vuelos-openapi.yaml`](contracts/vuelos-openapi.yaml))
+  y v2 ([`contracts/vuelos-openapi-v2.yaml`](contracts/vuelos-openapi-v2.yaml)); lo que el v2 no
+  declara es 404.
+- **Contrato v2 (Booking Prototipo)**: `X-User-Id` y `X-User-Roles` solo pasan con un token de
+  partner (`client_id`); en `/api/v2/**` los errores del borde son el ProblemDetails v2 (con
+  `instance`, `correlation_id` y `timestamp`).
 - **Borde**:
   - CORS único (borra el del upstream).
   - IP real según `TRUST_PROXY_HOPS`.
@@ -35,14 +42,17 @@ apps, B2B        │ CORS · X-Request-Id · IP real · streaming  │──▶ 
 - **Observabilidad**:
   - Trazas W3C con OpenTelemetry: el gateway es la raíz y propaga `traceparent` a cada upstream.
   - `X-Trace-Id` en cada respuesta y `traceId` en cada línea de log.
+  - `X-Correlation-Id` (el proceso de negocio): se conserva o se genera, va a cada upstream y vuelve
+    en toda respuesta; la línea de acceso lleva los campos del contrato v2 (§6.4).
   - Métricas Prometheus en un puerto aparte (`METRICS_PORT`, 9464).
   - El estándar que siguen los demás servicios está en
     [`docs/OBSERVABILIDAD.md`](docs/OBSERVABILIDAD.md); Jaeger y Prometheus locales, en
     [`observabilidad/`](observabilidad/).
 
 Node 22, TypeScript estricto y Fastify 5, sin Nest. Dependencias: `fastify`, `jose`, `yaml`,
-OpenTelemetry (`api`, `sdk-trace-node`, `exporter-trace-otlp-http`, `resources`) y `prom-client`,
-justificadas en [`docs/PLAN.md`](docs/PLAN.md). Reglas en [`CLAUDE.md`](CLAUDE.md);
+OpenTelemetry (`api`, `sdk-trace-node`, `exporter-trace-otlp-http`, `resources`) y `prom-client`
+(en desarrollo, además, `ajv` para validar los errores contra el contrato), justificadas en
+[`docs/PLAN.md`](docs/PLAN.md). Reglas en [`CLAUDE.md`](CLAUDE.md);
 despliegue y variables en [`docs/DEPLOY.md`](docs/DEPLOY.md).
 
 ## Empezar en local

@@ -53,4 +53,26 @@ if grep -qi '^x-powered-by\|^server:' <<<"$cabeceras"; then
   fallos=$((fallos + 1))
 fi
 
+# Contrato v2: lo protegido sin token y lo no declarado se niegan en el borde con el ProblemDetails v2,
+# y el X-Correlation-Id válido vuelve sin cambios (también en el error)
+comprobar 'v2: ruta protegida sin token' 401 "$BASE/api/v2/vuelos/bookings"
+comprobar 'v2: lo no declarado' 404 "$BASE/api/v2/vuelos/no-declarada"
+comprobar 'v2: /api/v2/docs no se expone' 404 "$BASE/api/v2/docs"
+v2=$(curl -s -D - -H 'x-correlation-id: corr-smoke-1' "$BASE/api/v2/vuelos/bookings")
+if grep -qi '^x-correlation-id: corr-smoke-1' <<<"$v2" &&
+  grep -q '"code":"UNAUTHORIZED"' <<<"$v2" &&
+  grep -q '"correlation_id":"corr-smoke-1"' <<<"$v2" &&
+  grep -q '"instance":"/api/v2/vuelos/bookings"' <<<"$v2"; then
+  echo 'ok   v2: ProblemDetails v2 con el mismo correlation_id'
+else
+  echo 'MAL  v2: el 401 no es el ProblemDetails v2 o no devuelve el X-Correlation-Id'
+  fallos=$((fallos + 1))
+fi
+if grep -qi '^x-correlation-id: corr-[0-9a-f-]\{36\}' <<<"$(curl -s -D - -o /dev/null "$BASE/health")"; then
+  echo 'ok   sin X-Correlation-Id, el gateway genera corr-<uuid>'
+else
+  echo 'MAL  el gateway no generó el X-Correlation-Id'
+  fallos=$((fallos + 1))
+fi
+
 [ "$fallos" -eq 0 ] && echo 'smoke: todo bien' || { echo "smoke: $fallos fallo(s)"; exit 1; }
