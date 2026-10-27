@@ -74,7 +74,9 @@ observabilidad de los cinco servicios (fase 7a), en `docs/OBSERVABILIDAD.md`.
   `AUTH_UNAVAILABLE` con `Retry-After`, nunca 401 ni dejar pasar.
 - Ruta pública: el token no se mira. Si es inválido, igual pasa sin tocar y el servicio decide.
 - Errores del borde: ProblemDetails con la forma del contrato del core (sin campos extra) y siempre
-  `X-Request-Id`. 401 con `WWW-Authenticate: Bearer`; 403 `insufficient_scope`.
+  `X-Request-Id` y `X-Correlation-Id`. En `/api/v2/**`, el ProblemDetails v2 (`instance`,
+  `correlation_id`, `timestamp` y los `code` genéricos v2), validado con Ajv contra el esquema del
+  contrato v2 en `test/errores-v2.spec.ts`; fuera de ahí, el v1 sin cambios. 401 con `WWW-Authenticate: Bearer`; 403 `insufficient_scope`.
 - Nunca al log, a un span, a una métrica ni a una respuesta: `Authorization`, tokens, la query,
   cuerpos, URLs internas ni mensajes de error de red (solo su código). La línea de acceso lleva
   requestId, traceId, spanId, método, plantilla de la ruta, upstream, status y ms.

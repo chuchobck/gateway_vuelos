@@ -13,7 +13,7 @@ import { Cors } from './borde/cors';
 import { ipCliente } from './borde/ip-cliente';
 import { Limitador } from './borde/limitador';
 import { MetricasBorde } from './borde/metricas-borde';
-import { CONTENT_TYPE_PROBLEMA, ErrorBorde } from './common/problema';
+import { CONTENT_TYPE_PROBLEMA, ErrorBorde, esRutaV2 } from './common/problema';
 import { Reloj } from './common/reloj';
 import { CABECERA_CORRELATION_ID, correlacionDe } from './common/correlation-id';
 import { CABECERA_REQUEST_ID, requestIdDe } from './common/request-id';
@@ -185,7 +185,9 @@ export function construirApp(opciones: OpcionesApp): FastifyInstance {
         .header(CABECERA_TRACE_ID, observacion.span.spanContext().traceId)
         .header(CABECERA_CORRELATION_ID, observacion.correlationId)
         .header('x-content-type-options', 'nosniff')
-        .send(JSON.stringify(problema.problema()));
+        .send(
+          JSON.stringify(cuerpoDeError(problema, peticion.url ?? '/', observacion.correlationId)),
+        );
     },
   });
 
@@ -269,17 +271,41 @@ export function construirApp(opciones: OpcionesApp): FastifyInstance {
     );
   });
 
+  /**
+   * El cuerpo de un error del borde: en /api/v2/** el ProblemDetails v2 (con instance,
+   * correlation_id y timestamp); en el resto, el v1 de siempre.
+   */
+  function cuerpoDeError(error: ErrorBorde, urlCruda: string, correlationId: string) {
+    return esRutaV2(urlCruda)
+      ? error.problemaV2({ urlCruda, correlationId, ahora: reloj.ahora() })
+      : error.problema();
+  }
+
+  function responderError(
+    peticion: FastifyRequest,
+    respuesta: FastifyReply,
+    error: ErrorBorde,
+  ): FastifyReply {
+    const correlationId = peticion.observacion?.correlationId ?? correlacionDe(undefined);
+    return respuesta
+      .code(error.status)
+      .headers(error.cabeceras)
+      .header('content-type', CONTENT_TYPE_PROBLEMA)
+      .header('cache-control', 'no-store')
+      .send(JSON.stringify(cuerpoDeError(error, peticion.raw.url ?? '/', correlationId)));
+  }
+
   app.setErrorHandler(async (error, peticion, respuesta) => {
-    if (error instanceof ErrorBorde) return responderError(respuesta, error);
+    if (error instanceof ErrorBorde) return responderError(peticion, respuesta, error);
     // Lo imprevisto: el log lleva el tipo (no el mensaje, que podría traer una URL interna)
     peticion.log.error({ err: error }, 'Error no controlado');
     peticion.contexto.motivo ??= 'error-interno';
-    return responderError(respuesta, new ErrorBorde(500, 'Internal error'));
+    return responderError(peticion, respuesta, new ErrorBorde(500, 'Internal error'));
   });
 
   app.setNotFoundHandler(async (peticion, respuesta) => {
     peticion.contexto.motivo = 'desconocida';
-    return responderError(respuesta, new ErrorBorde(404, NOT_FOUND));
+    return responderError(peticion, respuesta, new ErrorBorde(404, NOT_FOUND));
   });
 
   app.all('*', async (peticion, respuesta) => {
@@ -495,15 +521,6 @@ function limitar(
   throw new ErrorBorde(429, 'Too many requests; retry later', {
     cabeceras: { 'Retry-After': String(reintentarEnSegundos) },
   });
-}
-
-function responderError(respuesta: FastifyReply, error: ErrorBorde): FastifyReply {
-  return respuesta
-    .code(error.status)
-    .headers(error.cabeceras)
-    .header('content-type', CONTENT_TYPE_PROBLEMA)
-    .header('cache-control', 'no-store')
-    .send(JSON.stringify(error.problema()));
 }
 
 /** La ruta canónica que se decidió (o la fija de la regla) y la query tal cual. */

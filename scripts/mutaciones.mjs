@@ -38,6 +38,7 @@ const RESILIENCIA = 'test/resiliencia.spec.ts';
 const V2_RUTAS = 'test/v2-rutas.spec.ts';
 const PARTNER = 'test/usuario-partner.spec.ts';
 const CORRELACION_PRUEBA = 'test/correlacion.spec.ts';
+const ERRORES_V2 = 'test/errores-v2.spec.ts';
 
 /**
  * nombre, cambios por archivo [{ archivo, cambios: [buscar, reemplazar] }], prueba y filtro (-t)
@@ -467,6 +468,17 @@ const MUTACIONES = [
     ],
     prueba: CORRELACION_PRUEBA,
     filtro: 'en los errores del borde',
+  },
+  {
+    nombre: 'error-v1-en-v2: un error del borde en /api/v2 sale con el ProblemDetails v1',
+    archivos: [
+      {
+        archivo: APP,
+        cambios: [['return esRutaV2(urlCruda)', 'return false && esRutaV2(urlCruda)']],
+      },
+    ],
+    prueba: ERRORES_V2,
+    filtro: 'errores del borde en /api/v2',
   },
 ];
 const filtroNombre = process.argv[2];
