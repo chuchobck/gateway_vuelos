@@ -103,15 +103,15 @@ describe('contrato del core', () => {
         .filter((o) => o.plantilla.startsWith('/flights/v1/webhooks'))
         .flatMap((o) => o.alternativas.flat()),
     );
-    const delNotifier = TABLA_RUTAS.filter((r) => r.destino === 'notifier').map((r) =>
-      r.seguridad.modo === 'token' ? r.seguridad.scopes.join(' ') : r.seguridad.modo,
-    );
+    const delNotifier = TABLA_RUTAS.filter(
+      (r) => r.destino === 'notifier' && r.patron.startsWith('/flights/v1/'),
+    ).map((r) => (r.seguridad.modo === 'token' ? r.seguridad.scopes.join(' ') : r.seguridad.modo));
     expect([...delContrato]).toEqual(['flights:webhooks']);
     expect(delNotifier).toEqual(['flights:webhooks', 'flights:webhooks']);
   });
 
   it('rutas:listar muestra cada operación del contrato con su upstream', () => {
-    const filas = filasDeRutas(contrato);
+    const filas = filasDeRutas({ v1: contrato, v2: ContratoCore.leer(RUTA_CONTRATO_V2) });
     for (const o of contrato.operaciones) {
       if (o.plantilla.startsWith('/flights/v1/webhooks')) continue; // van por la regla del notifier
       expect(filas).toContainEqual(

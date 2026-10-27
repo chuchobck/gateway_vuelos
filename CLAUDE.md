@@ -45,18 +45,23 @@ observabilidad de los cinco servicios (fase 7a), en `docs/OBSERVABILIDAD.md`.
 - `observabilidad/`: Jaeger y Prometheus locales (docker-compose) y las consultas PromQL.
 - `src/app.ts` arma todo en una ruta comodín; `src/main.ts` arranca. `src/cli/listar-rutas.ts` es
   `npm run rutas:listar`.
-- `contracts/vuelos-openapi.yaml`: copia del contrato del core. **No se edita a mano**:
-  `npm run contrato:sync` la trae de `main` del core y `npm run contrato:check` la compara.
+- `contracts/vuelos-openapi.yaml` y `contracts/vuelos-openapi-v2.yaml`: copias de los contratos v1
+  y v2 del core. **No se editan a mano**: `npm run contrato:sync` las trae de `main` del core y
+  `npm run contrato:check` las compara.
 
 ## Rutas
 
-- Ninguna regla reescribe la ruta: cada servicio conserva su prefijo.
+- Ninguna regla reescribe la ruta: cada servicio conserva su prefijo. Única excepción, con
+  `rutaUpstream`: `/api/v2/oauth2/token` → `/oauth2/token` de identity (el `tokenUrl` relativo del
+  contrato v2). No se agrega otra sin anotarla aquí y en `docs/RUTAS.md`.
 - Se normaliza ANTES de decidir. Lo ambiguo se rechaza con 400, no se arregla. Se reenvía la ruta
   canónica que se decidió, nunca la cruda.
 - `/internal/**` y `/metrics` se evalúan antes que la tabla y responden igual que una ruta
   desconocida (404). Nunca se agrega una regla que lleve a ellos.
 - La seguridad de `/flights/v1/**` sale del OpenAPI del core. Lo que el contrato no declara exige un
-  token válido. Una regla manual nueva lleva su `nota` y va a `docs/RUTAS.md`.
+  token válido. La de `/api/v2/**` sale del contrato v2 (`contracts/vuelos-openapi-v2.yaml`) y lo que
+  no declara se niega (404) sin llegar a ningún servicio. Una regla manual nueva lleva su `nota` y
+  va a `docs/RUTAS.md`.
 - Si `contrato:sync` cambia los scopes, `test/contrato.spec.ts` falla a propósito: se revisa el
   cambio y se actualiza la lista esperada y `docs/RUTAS.md`.
 

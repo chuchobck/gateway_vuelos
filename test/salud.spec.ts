@@ -21,6 +21,7 @@ describe('salud', () => {
       expect(listo.json()).toEqual({
         status: 'UP',
         contract: { version: '1.5.0.0', operations: 22 },
+        contractV2: { version: '2.0.0', operations: 30 },
       });
       expect(listo.cabeceras['cache-control']).toBe('no-store');
     } finally {

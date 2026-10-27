@@ -28,8 +28,8 @@ import {
 import { Metricas } from './observabilidad/metricas';
 import { camposDeTraza, marcarError, traceparentDe, Trazas } from './observabilidad/trazas';
 import { ClienteUpstream, ErrorUpstream } from './proxy/cliente-upstream';
-import { ContratoCore } from './rutas/contrato-core';
-import { normalizarRuta } from './rutas/normalizar-ruta';
+import { ContratoCore, RUTA_CONTRATO_V2 } from './rutas/contrato-core';
+import { normalizarRuta, RutaNormalizada } from './rutas/normalizar-ruta';
 import { ResolverRutas } from './rutas/resolver-ruta';
 import { ReglaRuta, TABLA_RUTAS } from './rutas/tabla-rutas';
 import { saludDeUpstreams } from './salud/salud';
@@ -61,6 +61,8 @@ export interface OpcionesApp {
   configuracion: Configuracion;
   reloj?: Reloj;
   contrato?: ContratoCore;
+  /** El contrato v2 (/api/v2); por defecto, la copia de contracts/vuelos-openapi-v2.yaml. */
+  contratoV2?: ContratoCore;
   /** Solo pruebas: otra tabla (p. ej. para comprobar que el bloqueo de /internal va primero). */
   tabla?: readonly ReglaRuta[];
   /** Solo pruebas: a dónde van los logs (una línea JSON por registro). */
@@ -90,7 +92,11 @@ export function construirApp(opciones: OpcionesApp): FastifyInstance {
   const { configuracion } = opciones;
   const reloj = opciones.reloj ?? new Reloj();
   const contrato = opciones.contrato ?? ContratoCore.leer();
-  const resolver = new ResolverRutas(contrato, opciones.tabla ?? TABLA_RUTAS);
+  const contratoV2 = opciones.contratoV2 ?? ContratoCore.leer(RUTA_CONTRATO_V2);
+  const resolver = new ResolverRutas(
+    { v1: contrato, v2: contratoV2 },
+    opciones.tabla ?? TABLA_RUTAS,
+  );
   const cors = new Cors(configuracion.corsOrigenes);
   const limiteGlobal = new Limitador(
     reloj,
@@ -263,7 +269,8 @@ export function construirApp(opciones: OpcionesApp): FastifyInstance {
     }
 
     if (decision.tipo !== 'ruta') {
-      // /internal/** y lo desconocido responden igual: no se revela qué existe detrás
+      // /internal/**, lo desconocido y lo que el contrato v2 no declara responden igual: no se
+      // revela qué existe detrás
       contexto.motivo = decision.tipo;
       throw new ErrorBorde(404, NOT_FOUND);
     }
@@ -280,7 +287,8 @@ export function construirApp(opciones: OpcionesApp): FastifyInstance {
     if (regla.limiteEstricto) {
       limitar(
         limiteEstricto,
-        `e:${regla.patron}:${contexto.ip}`,
+        // Por ruta de destino: /oauth2/token y /api/v2/oauth2/token comparten el contador
+        `e:${regla.rutaUpstream ?? regla.patron}:${contexto.ip}`,
         contexto,
         metricasBorde,
         'estricto',
@@ -341,7 +349,7 @@ export function construirApp(opciones: OpcionesApp): FastifyInstance {
     try {
       respuestaUpstream = await cliente.reenviar({
         metodo: peticion.method,
-        rutaYQuery: ruta.query === '' ? ruta.ruta : `${ruta.ruta}?${ruta.query}`,
+        rutaYQuery: rutaHaciaUpstream(regla, ruta),
         cabeceras: cabecerasHaciaUpstream(peticion.headers, {
           requestId: peticion.id,
           ipCliente: contexto.ip,
@@ -390,6 +398,7 @@ export function construirApp(opciones: OpcionesApp): FastifyInstance {
       return respuesta.send({
         status: 'UP',
         contract: { version: contrato.version, operations: contrato.operaciones.length },
+        contractV2: { version: contratoV2.version, operations: contratoV2.operaciones.length },
       });
     }
     return respuesta.send({
@@ -449,6 +458,12 @@ function responderError(respuesta: FastifyReply, error: ErrorBorde): FastifyRepl
     .header('content-type', CONTENT_TYPE_PROBLEMA)
     .header('cache-control', 'no-store')
     .send(JSON.stringify(error.problema()));
+}
+
+/** La ruta canónica que se decidió (o la fija de la regla) y la query tal cual. */
+function rutaHaciaUpstream(regla: ReglaRuta, ruta: RutaNormalizada): string {
+  const destino = regla.rutaUpstream ?? ruta.ruta;
+  return ruta.query === '' ? destino : `${destino}?${ruta.query}`;
 }
 
 function motivoDeSeguridad(status: number): string {
