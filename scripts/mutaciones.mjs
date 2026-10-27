@@ -187,7 +187,7 @@ const MUTACIONES = [
         cambios: [
           [
             '    } catch (error) {\n      const errorBorde = errorDeUpstream(error, contexto, peticion);',
-            "    } catch (primero) {\n      try {\n        respuestaUpstream = await cliente.reenviar({ metodo: peticion.method, rutaYQuery: ruta.ruta, cabeceras: cabecerasHaciaUpstream(peticion.headers, { requestId: peticion.id, ipCliente: contexto.ip, esquema: 'http', hostPublico: undefined, hostUpstream: cliente.host, traceparent: traceparentDe(spanUpstream) }), cuerpo: undefined, cuerpoMaximo: regla.cuerpoMaximo });\n      } catch {\n      const error = primero;\n      const errorBorde = errorDeUpstream(error, contexto, peticion);",
+            "    } catch (primero) {\n      try {\n        respuestaUpstream = await cliente.reenviar({ metodo: peticion.method, rutaYQuery: ruta.ruta, cabeceras: cabecerasHaciaUpstream(peticion.headers, { requestId: peticion.id, ipCliente: contexto.ip, esquema: 'http', hostPublico: undefined, hostUpstream: cliente.host, traceparent: traceparentDe(spanUpstream), partner: false, correlationId: 'corr-x' }), cuerpo: undefined, cuerpoMaximo: regla.cuerpoMaximo });\n      } catch {\n      const error = primero;\n      const errorBorde = errorDeUpstream(error, contexto, peticion);",
           ],
           [
             "      terminarUpstream('error');\n      throw errorBorde;\n    }",
@@ -329,8 +329,8 @@ const MUTACIONES = [
         archivo: APP,
         cambios: [
           [
-            "    if (decision.tipo === 'ruta') fijarRuta(peticion, decision.plantilla);",
-            '    fijarRuta(peticion, ruta.ruta);',
+            "    if (decision.tipo === 'ruta') {\n      fijarRuta(peticion, decision.plantilla);",
+            "    fijarRuta(peticion, ruta.ruta);\n    if (decision.tipo === 'ruta') {",
           ],
         ],
       },
@@ -388,8 +388,8 @@ const MUTACIONES = [
         archivo: GANCHO,
         cambios: [
           [
-            '    const observacion = peticion.observacion;\n    if (observacion) respuesta.header(',
-            '    await (trazas as unknown as { proveedor: { forceFlush(): Promise<void> } }).proveedor.forceFlush();\n    const observacion = peticion.observacion;\n    if (observacion) respuesta.header(',
+            '    const observacion = peticion.observacion;\n    if (observacion) {\n      respuesta.header(CABECERA_TRACE_ID',
+            '    await (trazas as unknown as { proveedor: { forceFlush(): Promise<void> } }).proveedor.forceFlush();\n    const observacion = peticion.observacion;\n    if (observacion) {\n      respuesta.header(CABECERA_TRACE_ID',
           ],
         ],
       },
