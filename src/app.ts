@@ -13,8 +13,9 @@ import { Cors } from './borde/cors';
 import { ipCliente } from './borde/ip-cliente';
 import { Limitador } from './borde/limitador';
 import { MetricasBorde } from './borde/metricas-borde';
-import { CONTENT_TYPE_PROBLEMA, ErrorBorde } from './common/problema';
+import { CONTENT_TYPE_PROBLEMA, ErrorBorde, esRutaV2 } from './common/problema';
 import { Reloj } from './common/reloj';
+import { CABECERA_CORRELATION_ID, correlacionDe } from './common/correlation-id';
 import { CABECERA_REQUEST_ID, requestIdDe } from './common/request-id';
 import { Configuracion, NombreUpstream, UPSTREAMS } from './config/entorno';
 import { cabecerasHaciaCliente, cabecerasHaciaUpstream, hostValido } from './proxy/cabeceras';
@@ -28,15 +29,15 @@ import {
 import { Metricas } from './observabilidad/metricas';
 import { camposDeTraza, marcarError, traceparentDe, Trazas } from './observabilidad/trazas';
 import { ClienteUpstream, ErrorUpstream } from './proxy/cliente-upstream';
-import { ContratoCore } from './rutas/contrato-core';
-import { normalizarRuta } from './rutas/normalizar-ruta';
+import { ContratoCore, RUTA_CONTRATO_V2 } from './rutas/contrato-core';
+import { normalizarRuta, RutaNormalizada } from './rutas/normalizar-ruta';
 import { ResolverRutas } from './rutas/resolver-ruta';
 import { ReglaRuta, TABLA_RUTAS } from './rutas/tabla-rutas';
 import { saludDeUpstreams } from './salud/salud';
 import { autorizar } from './seguridad/autorizar';
 import { ClavesJwks } from './seguridad/claves-jwks';
 import { Registro } from './seguridad/registro';
-import { VerificadorJwks } from './seguridad/verificador-jwks';
+import { IdentidadToken, VerificadorJwks } from './seguridad/verificador-jwks';
 
 /** Lo que el gateway anota de cada petición para su línea de log de acceso. */
 interface ContextoPeticion {
@@ -45,6 +46,8 @@ interface ContextoPeticion {
   upstream?: NombreUpstream | 'gateway';
   /** Por qué el borde respondió él mismo (bloqueada, desconocida, ambigua, token, scope...). */
   motivo?: string;
+  /** El operationId del contrato (v1 o v2), si la ruta es una operación suya. */
+  operacion?: string;
 }
 
 declare module 'fastify' {
@@ -61,6 +64,8 @@ export interface OpcionesApp {
   configuracion: Configuracion;
   reloj?: Reloj;
   contrato?: ContratoCore;
+  /** El contrato v2 (/api/v2); por defecto, la copia de contracts/vuelos-openapi-v2.yaml. */
+  contratoV2?: ContratoCore;
   /** Solo pruebas: otra tabla (p. ej. para comprobar que el bloqueo de /internal va primero). */
   tabla?: readonly ReglaRuta[];
   /** Solo pruebas: a dónde van los logs (una línea JSON por registro). */
@@ -90,7 +95,11 @@ export function construirApp(opciones: OpcionesApp): FastifyInstance {
   const { configuracion } = opciones;
   const reloj = opciones.reloj ?? new Reloj();
   const contrato = opciones.contrato ?? ContratoCore.leer();
-  const resolver = new ResolverRutas(contrato, opciones.tabla ?? TABLA_RUTAS);
+  const contratoV2 = opciones.contratoV2 ?? ContratoCore.leer(RUTA_CONTRATO_V2);
+  const resolver = new ResolverRutas(
+    { v1: contrato, v2: contratoV2 },
+    opciones.tabla ?? TABLA_RUTAS,
+  );
   const cors = new Cors(configuracion.corsOrigenes);
   const limiteGlobal = new Limitador(
     reloj,
@@ -120,6 +129,22 @@ export function construirApp(opciones: OpcionesApp): FastifyInstance {
     ...(opciones.esperaLoteMs ? { esperaLoteMs: opciones.esperaLoteMs } : {}),
   });
   const metricas = new Metricas(observabilidad);
+  /** Los campos de §6.4 de la línea de acceso; `service` es el service.name de las trazas. */
+  const camposDeAcceso = (
+    correlationId: string | undefined,
+    requestId: string,
+    operacion: string | null,
+    status: number,
+    latenciaMs: number,
+  ) => ({
+    timestamp: new Date().toISOString(),
+    service: observabilidad.servicio,
+    correlation_id: correlationId ?? null,
+    request_id: requestId,
+    operation: operacion,
+    status,
+    latency_ms: Math.round(latenciaMs * 10) / 10,
+  });
   const metricasBorde = new MetricasBorde(metricas);
 
   const app = Fastify({
@@ -143,7 +168,13 @@ export function construirApp(opciones: OpcionesApp): FastifyInstance {
       const observacion = observar(trazas, peticion as unknown as FastifyRequest);
       trazas.enContexto(observacion.contexto, () =>
         peticion.log.info(
-          { status: 400, ruta: RUTA_SIN_PLANTILLA, motivo: 'url-invalida', err: error },
+          {
+            ...camposDeAcceso(observacion.correlationId, peticion.id, null, 400, 0),
+            status: 400,
+            ruta: RUTA_SIN_PLANTILLA,
+            motivo: 'url-invalida',
+            err: error,
+          },
           'acceso',
         ),
       );
@@ -152,8 +183,11 @@ export function construirApp(opciones: OpcionesApp): FastifyInstance {
         .header('content-type', CONTENT_TYPE_PROBLEMA)
         .header('x-request-id', peticion.id)
         .header(CABECERA_TRACE_ID, observacion.span.spanContext().traceId)
+        .header(CABECERA_CORRELATION_ID, observacion.correlationId)
         .header('x-content-type-options', 'nosniff')
-        .send(JSON.stringify(problema.problema()));
+        .send(
+          JSON.stringify(cuerpoDeError(problema, peticion.url ?? '/', observacion.correlationId)),
+        );
     },
   });
 
@@ -208,13 +242,22 @@ export function construirApp(opciones: OpcionesApp): FastifyInstance {
   app.addHook('onResponse', async (peticion, respuesta) => {
     const contexto = peticion.contexto;
     if (!contexto) return; // un error del framework antes de onRequest: ya se registró
-    const ms = Number((process.hrtime.bigint() - contexto.inicio) / 1_000_000n);
+    const nanos = process.hrtime.bigint() - contexto.inicio;
+    const ms = Number(nanos / 1_000_000n);
     // onResponse corre fuera del contexto de la petición: se vuelve a entrar para el traceId
     const registrar = (trabajo: () => void) =>
       peticion.observacion ? trazas.enContexto(peticion.observacion.contexto, trabajo) : trabajo();
     registrar(() =>
       peticion.log.info(
         {
+          // Los campos del contrato v2 (§6, regla 4): los mismos en los cinco servicios
+          ...camposDeAcceso(
+            peticion.observacion?.correlationId,
+            peticion.id,
+            contexto.operacion ?? null,
+            respuesta.statusCode,
+            Number(nanos) / 1e6,
+          ),
           metodo: peticion.method,
           // La PLANTILLA, nunca la ruta pedida: una ruta cruda puede traer un id de reserva o un correo
           ruta: peticion.observacion?.ruta ?? RUTA_SIN_PLANTILLA,
@@ -228,17 +271,41 @@ export function construirApp(opciones: OpcionesApp): FastifyInstance {
     );
   });
 
+  /**
+   * El cuerpo de un error del borde: en /api/v2/** el ProblemDetails v2 (con instance,
+   * correlation_id y timestamp); en el resto, el v1 de siempre.
+   */
+  function cuerpoDeError(error: ErrorBorde, urlCruda: string, correlationId: string) {
+    return esRutaV2(urlCruda)
+      ? error.problemaV2({ urlCruda, correlationId, ahora: reloj.ahora() })
+      : error.problema();
+  }
+
+  function responderError(
+    peticion: FastifyRequest,
+    respuesta: FastifyReply,
+    error: ErrorBorde,
+  ): FastifyReply {
+    const correlationId = peticion.observacion?.correlationId ?? correlacionDe(undefined);
+    return respuesta
+      .code(error.status)
+      .headers(error.cabeceras)
+      .header('content-type', CONTENT_TYPE_PROBLEMA)
+      .header('cache-control', 'no-store')
+      .send(JSON.stringify(cuerpoDeError(error, peticion.raw.url ?? '/', correlationId)));
+  }
+
   app.setErrorHandler(async (error, peticion, respuesta) => {
-    if (error instanceof ErrorBorde) return responderError(respuesta, error);
+    if (error instanceof ErrorBorde) return responderError(peticion, respuesta, error);
     // Lo imprevisto: el log lleva el tipo (no el mensaje, que podría traer una URL interna)
     peticion.log.error({ err: error }, 'Error no controlado');
     peticion.contexto.motivo ??= 'error-interno';
-    return responderError(respuesta, new ErrorBorde(500, 'Internal error'));
+    return responderError(peticion, respuesta, new ErrorBorde(500, 'Internal error'));
   });
 
   app.setNotFoundHandler(async (peticion, respuesta) => {
     peticion.contexto.motivo = 'desconocida';
-    return responderError(respuesta, new ErrorBorde(404, NOT_FOUND));
+    return responderError(peticion, respuesta, new ErrorBorde(404, NOT_FOUND));
   });
 
   app.all('*', async (peticion, respuesta) => {
@@ -254,7 +321,10 @@ export function construirApp(opciones: OpcionesApp): FastifyInstance {
 
     const decision = resolver.decidir(peticion.method, ruta);
     // La plantilla nombra el span y etiqueta las métricas; sin regla, queda __unmatched__
-    if (decision.tipo === 'ruta') fijarRuta(peticion, decision.plantilla);
+    if (decision.tipo === 'ruta') {
+      fijarRuta(peticion, decision.plantilla);
+      if (decision.operacion) contexto.operacion = decision.operacion;
+    }
 
     if (cors.esPreflight(peticion.method, peticion.headers)) {
       contexto.motivo = 'preflight';
@@ -263,7 +333,8 @@ export function construirApp(opciones: OpcionesApp): FastifyInstance {
     }
 
     if (decision.tipo !== 'ruta') {
-      // /internal/** y lo desconocido responden igual: no se revela qué existe detrás
+      // /internal/**, lo desconocido y lo que el contrato v2 no declara responden igual: no se
+      // revela qué existe detrás
       contexto.motivo = decision.tipo;
       throw new ErrorBorde(404, NOT_FOUND);
     }
@@ -280,7 +351,8 @@ export function construirApp(opciones: OpcionesApp): FastifyInstance {
     if (regla.limiteEstricto) {
       limitar(
         limiteEstricto,
-        `e:${regla.patron}:${contexto.ip}`,
+        // Por ruta de destino: /oauth2/token y /api/v2/oauth2/token comparten el contador
+        `e:${regla.rutaUpstream ?? regla.patron}:${contexto.ip}`,
         contexto,
         metricasBorde,
         'estricto',
@@ -305,10 +377,12 @@ export function construirApp(opciones: OpcionesApp): FastifyInstance {
             'quinde.request_id': peticion.id,
           })
         : undefined;
+    // La identidad del token, solo si la ruta lo exigió y es válido (en una pública: undefined)
+    let identidad: IdentidadToken | undefined;
     try {
       const verificar = () =>
         autorizar(decision.seguridad, peticion.headers.authorization, verificador);
-      await (spanAuth ? trazas.conSpan(spanAuth, verificar) : verificar());
+      identidad = await (spanAuth ? trazas.conSpan(spanAuth, verificar) : verificar());
     } catch (error) {
       if (error instanceof ErrorBorde) {
         contexto.motivo = motivoDeSeguridad(error.status);
@@ -329,6 +403,9 @@ export function construirApp(opciones: OpcionesApp): FastifyInstance {
       'http.route': decision.plantilla,
       'quinde.upstream': regla.destino,
       'quinde.request_id': peticion.id,
+      ...(peticion.observacion
+        ? { 'quinde.correlation_id': peticion.observacion.correlationId }
+        : {}),
     });
     const inicioUpstream = process.hrtime.bigint();
     const terminarUpstream = (status: number | 'error') => {
@@ -341,7 +418,7 @@ export function construirApp(opciones: OpcionesApp): FastifyInstance {
     try {
       respuestaUpstream = await cliente.reenviar({
         metodo: peticion.method,
-        rutaYQuery: ruta.query === '' ? ruta.ruta : `${ruta.ruta}?${ruta.query}`,
+        rutaYQuery: rutaHaciaUpstream(regla, ruta),
         cabeceras: cabecerasHaciaUpstream(peticion.headers, {
           requestId: peticion.id,
           ipCliente: contexto.ip,
@@ -349,6 +426,9 @@ export function construirApp(opciones: OpcionesApp): FastifyInstance {
           hostPublico: hostValido(peticion.headers.host),
           hostUpstream: cliente.host,
           traceparent: traceparentDe(spanUpstream),
+          // Un token de partner trae client_id (identity no lo pone en los de personas)
+          partner: identidad?.clienteId !== undefined,
+          correlationId: peticion.observacion?.correlationId ?? correlacionDe(undefined),
         }),
         cuerpo: tieneCuerpo ? peticion.raw : undefined,
         cuerpoMaximo: regla.cuerpoMaximo,
@@ -390,6 +470,7 @@ export function construirApp(opciones: OpcionesApp): FastifyInstance {
       return respuesta.send({
         status: 'UP',
         contract: { version: contrato.version, operations: contrato.operaciones.length },
+        contractV2: { version: contratoV2.version, operations: contratoV2.operaciones.length },
       });
     }
     return respuesta.send({
@@ -442,13 +523,10 @@ function limitar(
   });
 }
 
-function responderError(respuesta: FastifyReply, error: ErrorBorde): FastifyReply {
-  return respuesta
-    .code(error.status)
-    .headers(error.cabeceras)
-    .header('content-type', CONTENT_TYPE_PROBLEMA)
-    .header('cache-control', 'no-store')
-    .send(JSON.stringify(error.problema()));
+/** La ruta canónica que se decidió (o la fija de la regla) y la query tal cual. */
+function rutaHaciaUpstream(regla: ReglaRuta, ruta: RutaNormalizada): string {
+  const destino = regla.rutaUpstream ?? ruta.ruta;
+  return ruta.query === '' ? destino : `${destino}?${ruta.query}`;
 }
 
 function motivoDeSeguridad(status: number): string {

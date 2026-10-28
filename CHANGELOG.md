@@ -3,6 +3,40 @@
 Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/); versiones con
 [SemVer](https://semver.org/lang/es/).
 
+## [Sin publicar] — fase G2: contrato v2 (RDA2)
+
+### Agregado
+
+- **Contrato v2 del core** vendored (`contracts/vuelos-openapi-v2.yaml`), con `contrato:sync` y
+  `contrato:check` para los dos contratos (`--contrato v1|v2`) y el job informativo de CI.
+- **Rutas `/api/v2`**: `/api/v2/vuelos/webhooks`, `/webhooks/{id}` y `/eventos` al notifier; el
+  resto de `/api/v2/vuelos/**` al core, con los scopes de cada operación del contrato v2. Públicas:
+  `health`, `search`, `seatmap` y `GET flights/{n}/status`. Lo no declarado es 404 en el borde.
+- **`/api/v2/oauth2/token`** → `/oauth2/token` de identity (el `tokenUrl` relativo del contrato
+  v2), con el límite estricto compartido con `/oauth2/token`.
+- **`X-Correlation-Id`**: se conserva el válido (`^[A-Za-z0-9._:-]{1,100}$`) o se genera
+  `corr-<uuid>`; va a cada upstream y vuelve en toda respuesta, también en los errores del borde.
+  Atributo `quinde.correlation_id` en los spans, `correlationId` en cada línea de log y, en la de
+  acceso, los campos del contrato v2 §6.4 (`correlation_id`, `request_id`, `service`, `operation`,
+  `status`, `latency_ms`, `timestamp`). Sección 7 de `docs/OBSERVABILIDAD.md`, con las reglas de
+  propagación por protocolo.
+- **ProblemDetails v2** para los errores del borde en `/api/v2/**` (`instance`, `correlation_id`,
+  `timestamp`, `code` genéricos v2), validado con Ajv contra el contrato en las pruebas.
+- **Estándar**: `rpc.system`, `rpc.service`, `rpc.method`, `rpc.grpc.status_code` y
+  `graphql.operation.type` en la lista común de atributos, con su valor validado; `payments` como
+  upstream.
+- CORS: `X-Correlation-Id` permitida y expuesta; `Idempotent-Replayed` y `Location` expuestas.
+- `/health/ready` informa también el contrato v2 (`contractV2`).
+- `scripts/e2e-local.sh` recorre el contrato v2 como Booking Prototipo (pasos 16 a 23) y el smoke
+  comprueba lo de v2.
+- **Pruebas**: 571 en 18 suites. Seis mutaciones nuevas; 29 de 29 detectadas.
+
+### Cambiado
+
+- Las `X-User-*` del cliente se borran salvo con un token válido de partner (claim `client_id`):
+  sin token, con uno de persona y en toda ruta pública.
+- La línea de acceso suma los campos de §6.4 (conserva los de la 7a).
+
 ## [Sin publicar] — fase 7a: observabilidad
 
 ### Agregado

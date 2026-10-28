@@ -80,10 +80,11 @@ jobs:
           exit "$status"
 
   contrato:
-    name: contrato del core (informativo)
+    name: contratos del core v1 y v2 (informativo)
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    # Informa si la copia de contracts/vuelos-openapi.yaml se quedó atrás del core; no bloquea
+    # Informa si las copias de contracts/vuelos-openapi.yaml y -v2.yaml se quedaron atrás del core;
+    # no bloquea
     continue-on-error: true
 
     steps:
@@ -109,7 +110,7 @@ jobs:
       - name: La imagen corre sin privilegios, trae el contrato y arranca
         run: |
           test "$(docker run --rm --entrypoint id quinde-gateway:ci -u)" = "1000"
-          docker run --rm --entrypoint sh quinde-gateway:ci -c 'test -f contracts/vuelos-openapi.yaml'
+          docker run --rm --entrypoint sh quinde-gateway:ci -c 'test -f contracts/vuelos-openapi.yaml && test -f contracts/vuelos-openapi-v2.yaml'
           docker run -d --name gw -p 8080:8080 -p 9464:9464 \
             -e UPSTREAM_CORE_URL=http://127.0.0.1:9 -e UPSTREAM_BFF_URL=http://127.0.0.1:9 \
             -e UPSTREAM_IDENTITY_URL=http://127.0.0.1:9 -e UPSTREAM_NOTIFIER_URL=http://127.0.0.1:9 \

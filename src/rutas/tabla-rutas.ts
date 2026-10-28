@@ -9,11 +9,18 @@ import { NombreUpstream } from '../config/entorno';
  * - `token`: exige un token válido de identity con todos los `scopes` (vacío: solo un token
  *   válido). Sin él, 401/403/503 en el borde y la petición no llega al servicio.
  * - `contrato`: la seguridad sale del OpenAPI del core (copia en contracts/), operación por
- *   operación. Lo que el contrato no declara exige un token válido sin scopes (ver
- *   resolver-ruta.ts).
+ *   operación: del v1 (/flights/v1) o del v2 (/api/v2). Lo que ese contrato no declara (otro
+ *   método, otra ruta) depende de `noDeclarada`: `token` exige un token válido sin scopes (v1,
+ *   como hasta ahora); `negar` responde 404 sin llegar al servicio (v2: Booking solo ve lo que el
+ *   contrato publica). Ver resolver-ruta.ts.
  */
 export type Seguridad =
-  { modo: 'publica' } | { modo: 'token'; scopes: readonly string[] } | { modo: 'contrato' };
+  | { modo: 'publica' }
+  | { modo: 'token'; scopes: readonly string[] }
+  | { modo: 'contrato'; contrato: VersionContrato; noDeclarada: 'token' | 'negar' };
+
+/** Los dos contratos del core: v1 (/flights/v1, 1.5.0.0) y v2 (/api/v2, Booking Prototipo). */
+export type VersionContrato = 'v1' | 'v2';
 
 export interface ReglaRuta {
   /**
@@ -28,6 +35,12 @@ export interface ReglaRuta {
   limiteEstricto?: boolean;
   /** Tope del cuerpo en bytes: el del servicio de destino (más grande, 413 sin llegar a él). */
   cuerpoMaximo: number;
+  /**
+   * La ÚNICA excepción a "ninguna regla reescribe la ruta": la ruta fija con que llega al
+   * upstream (la query pasa igual). Solo para patrones sin comodines: /api/v2/oauth2/token, que
+   * el contrato v2 declara (tokenUrl relativo a /api/v2) y que identity sirve en /oauth2/token.
+   */
+  rutaUpstream?: string;
   /** Por qué la regla es así, para `npm run rutas:listar` y docs/RUTAS.md. */
   nota: string;
 }
@@ -36,6 +49,8 @@ export interface ReglaRuta {
 export const CUERPO_100KB = 100 * 1024;
 
 const PUBLICA: Seguridad = { modo: 'publica' };
+const CONTRATO_V1: Seguridad = { modo: 'contrato', contrato: 'v1', noDeclarada: 'token' };
+const CONTRATO_V2: Seguridad = { modo: 'contrato', contrato: 'v2', noDeclarada: 'negar' };
 
 /**
  * Lo que nunca se enruta, se evalúe antes que la tabla y pase lo que pase en ella. Responde 404,
@@ -48,8 +63,9 @@ export const RUTAS_BLOQUEADAS: readonly string[] = ['/internal/**', '/metrics/**
 
 /**
  * La tabla de rutas del gateway: la primera regla que coincide decide. Ninguna reescribe la
- * ruta: cada servicio conserva su prefijo. Lo que no está aquí es 404 (también /api/docs de cada
- * servicio y el gRPC del core, que no se exponen).
+ * ruta (cada servicio conserva su prefijo), salvo /api/v2/oauth2/token (ver `rutaUpstream`). Lo
+ * que no está aquí es 404 (también /api/docs y /api/v2/docs de cada servicio y el gRPC del core,
+ * que no se exponen).
  */
 export const TABLA_RUTAS: readonly ReglaRuta[] = [
   // --- el propio gateway ---------------------------------------------------------------------
@@ -125,9 +141,48 @@ export const TABLA_RUTAS: readonly ReglaRuta[] = [
   {
     patron: '/flights/v1/**',
     destino: 'core',
-    seguridad: { modo: 'contrato' },
+    seguridad: CONTRATO_V1,
     cuerpoMaximo: CUERPO_100KB,
     nota: 'Scopes del OpenAPI del core; lo que el contrato no declara exige un token válido',
+  },
+
+  // --- contrato v2 (/api/v2, Booking Prototipo) ----------------------------------------------
+  {
+    patron: '/api/v2/vuelos/webhooks',
+    destino: 'notifier',
+    seguridad: CONTRATO_V2,
+    cuerpoMaximo: CUERPO_100KB,
+    nota: 'Suscripciones v2 (listWebhooks, createWebhook): las sirve el notifier, no el core',
+  },
+  {
+    patron: '/api/v2/vuelos/webhooks/*',
+    destino: 'notifier',
+    seguridad: CONTRATO_V2,
+    cuerpoMaximo: CUERPO_100KB,
+    nota: 'deleteWebhook',
+  },
+  {
+    patron: '/api/v2/vuelos/eventos',
+    destino: 'notifier',
+    seguridad: CONTRATO_V2,
+    cuerpoMaximo: CUERPO_100KB,
+    nota: 'listOutboxEvents: el feed de eventos lo sirve el notifier',
+  },
+  {
+    patron: '/api/v2/vuelos/**',
+    destino: 'core',
+    seguridad: CONTRATO_V2,
+    cuerpoMaximo: CUERPO_100KB,
+    nota: 'Scopes del OpenAPI v2 del core; lo que el contrato v2 no declara es 404 en el borde',
+  },
+  {
+    patron: '/api/v2/oauth2/token',
+    destino: 'identity',
+    seguridad: PUBLICA,
+    limiteEstricto: true,
+    cuerpoMaximo: CUERPO_100KB,
+    rutaUpstream: '/oauth2/token',
+    nota: 'tokenUrl del contrato v2 ("/oauth2/token" relativo a /api/v2): va a /oauth2/token',
   },
 
   // --- identity ------------------------------------------------------------------------------

@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { filasDeRutas } from '../src/cli/listar-rutas';
-import { ContratoCore, RUTA_CONTRATO } from '../src/rutas/contrato-core';
+import { ContratoCore, RUTA_CONTRATO, RUTA_CONTRATO_V2 } from '../src/rutas/contrato-core';
 import { TABLA_RUTAS } from '../src/rutas/tabla-rutas';
 
 /**
@@ -33,15 +33,66 @@ const ESPERADA = [
   'GET /flights/v1/flights/{flightNumber}/status → pública',
 ];
 
+/** La del contrato v2 (/api/v2, Booking Prototipo): las 30 operaciones, como la v1 de arriba. */
+const ESPERADA_V2 = [
+  'GET /api/v2/vuelos/health → pública',
+  'GET /api/v2/vuelos/eventos → flights:read',
+  'GET /api/v2/vuelos/promociones/contrato → flights:read',
+  'PUT /api/v2/vuelos/promociones/contrato → flights:admin',
+  'POST /api/v2/vuelos/search → pública',
+  'GET /api/v2/vuelos/offers/{offerId}/seatmap → pública',
+  'GET /api/v2/vuelos/flights/{flightNumber}/status → pública',
+  'PATCH /api/v2/vuelos/flights/{flightNumber}/status → flights:ops',
+  'GET /api/v2/vuelos/operaciones/vuelos → flights:ops',
+  'POST /api/v2/vuelos/offers/hold → flights:hold',
+  'GET /api/v2/vuelos/offers/hold/{holdId} → flights:read',
+  'DELETE /api/v2/vuelos/offers/hold/{holdId} → flights:hold',
+  'GET /api/v2/vuelos/bookings → flights:read',
+  'POST /api/v2/vuelos/bookings → flights:book',
+  'GET /api/v2/vuelos/bookings/{bookingId} → flights:read',
+  'GET /api/v2/vuelos/bookings/{bookingId}/tickets → flights:read',
+  'POST /api/v2/vuelos/bookings/{bookingId}/tickets → flights:book',
+  'GET /api/v2/vuelos/bookings/{bookingId}/tickets/{ticketId} → flights:read',
+  'PUT /api/v2/vuelos/bookings/{bookingId}/seats → flights:book',
+  'POST /api/v2/vuelos/bookings/{bookingId}/check-in → flights:book',
+  'GET /api/v2/vuelos/bookings/{bookingId}/boarding-passes → flights:read',
+  'GET /api/v2/vuelos/bookings/{bookingId}/baggage-options → flights:read',
+  'POST /api/v2/vuelos/bookings/{bookingId}/baggage → flights:book',
+  'POST /api/v2/vuelos/bookings/{bookingId}/date-change/search → flights:read',
+  'POST /api/v2/vuelos/bookings/{bookingId}/date-change → flights:book',
+  'GET /api/v2/vuelos/bookings/{bookingId}/cancellation-quote → flights:read',
+  'POST /api/v2/vuelos/bookings/{bookingId}/cancel → flights:cancel',
+  'GET /api/v2/vuelos/webhooks → flights:webhooks',
+  'POST /api/v2/vuelos/webhooks → flights:webhooks',
+  'DELETE /api/v2/vuelos/webhooks/{id} → flights:webhooks',
+];
+
+function tablaDe(contrato: ContratoCore): string[] {
+  return contrato.operaciones.map(
+    (o) =>
+      `${o.metodo} ${o.plantilla} → ${o.publica ? 'pública' : o.alternativas.map((a) => a.join(' ')).join(' | ')}`,
+  );
+}
+
+describe('contrato v2 del core', () => {
+  const v2 = ContratoCore.leer(RUTA_CONTRATO_V2);
+
+  it('la tabla de scopes generada es la esperada, con el prefijo relativo de servers', () => {
+    expect(tablaDe(v2)).toEqual(ESPERADA_V2);
+    expect(v2.prefijo).toBe('/api/v2');
+    expect(v2.version).toBe('2.0.0');
+  });
+
+  it('la copia vendored no se edita a mano', () => {
+    expect(readFileSync(RUTA_CONTRATO_V2, 'utf8')).toContain('PartnerOAuth2');
+  });
+});
+
 describe('contrato del core', () => {
   const contrato = ContratoCore.leer();
 
   it('la tabla de scopes generada es la esperada (si el core la cambia, esto lo nota)', () => {
-    const generada = contrato.operaciones.map(
-      (o) =>
-        `${o.metodo} ${o.plantilla} → ${o.publica ? 'pública' : o.alternativas.map((a) => a.join(' ')).join(' | ')}`,
-    );
-    expect(generada).toEqual(ESPERADA);
+    expect(tablaDe(contrato)).toEqual(ESPERADA);
     expect(contrato.prefijo).toBe('/flights/v1');
     expect(contrato.version).toBe('1.5.0.0');
   });
@@ -52,15 +103,15 @@ describe('contrato del core', () => {
         .filter((o) => o.plantilla.startsWith('/flights/v1/webhooks'))
         .flatMap((o) => o.alternativas.flat()),
     );
-    const delNotifier = TABLA_RUTAS.filter((r) => r.destino === 'notifier').map((r) =>
-      r.seguridad.modo === 'token' ? r.seguridad.scopes.join(' ') : r.seguridad.modo,
-    );
+    const delNotifier = TABLA_RUTAS.filter(
+      (r) => r.destino === 'notifier' && r.patron.startsWith('/flights/v1/'),
+    ).map((r) => (r.seguridad.modo === 'token' ? r.seguridad.scopes.join(' ') : r.seguridad.modo));
     expect([...delContrato]).toEqual(['flights:webhooks']);
     expect(delNotifier).toEqual(['flights:webhooks', 'flights:webhooks']);
   });
 
   it('rutas:listar muestra cada operación del contrato con su upstream', () => {
-    const filas = filasDeRutas(contrato);
+    const filas = filasDeRutas({ v1: contrato, v2: ContratoCore.leer(RUTA_CONTRATO_V2) });
     for (const o of contrato.operaciones) {
       if (o.plantilla.startsWith('/flights/v1/webhooks')) continue; // van por la regla del notifier
       expect(filas).toContainEqual(

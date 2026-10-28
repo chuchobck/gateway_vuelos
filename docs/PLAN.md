@@ -2,7 +2,8 @@
 
 Reto 2 de Integración de Sistemas (PUCE). Fase 6a: la puerta única de la arquitectura. Fase 7a:
 la observabilidad (trazas, métricas y logs), cuyo estándar define este repo para los cinco
-servicios ([OBSERVABILIDAD.md](OBSERVABILIDAD.md)). Enruta a
+servicios ([OBSERVABILIDAD.md](OBSERVABILIDAD.md)). Fase G2: el contrato v2 (RDA2), por el que
+Booking Prototipo entra solo por `https://<gateway>/api/v2/vuelos/*`. Enruta a
 core, bff, identity y notifier, aplica las políticas de seguridad en el borde y esconde lo
 interno. No tiene lógica de negocio ni base de datos. Los servicios siguen validando todo: el
 gateway nunca es la única barrera.
@@ -12,6 +13,7 @@ gateway nunca es la única barrera.
 | Fase | Estado | Verificación |
 | --- | --- | --- |
 | 6a. Gateway | Hecha (2026-10-16), en `feat/r2-gateway` | `lint`, `format:check` y `build` en cada commit. `npm test`: 345 pruebas en 10 suites, contra upstreams falsos HTTP reales y un identity falso con JWKS. `npm run test:mutaciones`: 17 de 17 detectadas. `scripts/smoke.sh` contra el gateway compilado y contra la imagen de Docker (uid 1000, `/health/ready` 200). Recorrido real con los cinco servicios en `main`, solo por el gateway: `scripts/e2e-local.sh`, todo en verde (salida en [E2E-LOCAL.md](E2E-LOCAL.md)) |
+| G2. Contrato v2 | Hecha (2026-10-27), en `feat/v2-rutas` | `lint`, `format:check` y `build` en cada commit. `npm test`: 571 pruebas en 18 suites (4 nuevas: rutas v2, X-User-*, correlación y errores v2 validados con Ajv contra el contrato). `npm run test:mutaciones`: 29 de 29 (6 nuevas). `scripts/smoke.sh` con 5 comprobaciones v2. Recorrido real con identity, core, bff y notifier de `main` (el notifier v2, falso): pasos 1 a 23 en verde, el mismo `X-Correlation-Id` en las respuestas y en los logs del gateway, el core y el identity (salida en [E2E-LOCAL.md](E2E-LOCAL.md)) |
 | 7a. Observabilidad | Hecha (2026-10-17), en `feat/r2-observabilidad` | `lint`, `format:check` y `build` en cada commit. `npm test`: 404 pruebas en 14 suites, con un recolector OTLP falso por HTTP. `npm run test:mutaciones`: 23 de 23 (6 nuevas). `scripts/smoke.sh` con X-Trace-Id y `/metrics` 404. Recorrido real con los cinco servicios: métricas en el 9464 y spans en un recolector OTLP falso, todo en verde (salida en [E2E-LOCAL.md](E2E-LOCAL.md)). Jaeger y Prometheus reales: sin verificar (no había Docker) |
 
 ## Dependencias (y por qué cada una)
@@ -297,3 +299,122 @@ configuración que el resto de repos.
 | Logs | `traceId` y `spanId` de `camposDeTraza()` en cada línea, junto al requestId que ya ponen |
 | Respuesta | `X-Trace-Id` en las respuestas HTTP. En GraphQL, además, en `extensions` del error, junto al `requestId` |
 | Webhooks y bandeja (7c) | El notifier no manda `traceparent` a terceros. El core guarda el `traceparent` en `evento_saliente` y el relevo continúa esa traza |
+
+## Fase G2: contrato v2 (RDA2)
+
+### Qué se hizo
+
+- **Contrato v2 vendored**: `contracts/vuelos-openapi-v2.yaml`, con el mismo `contrato:sync` y
+  `contrato:check` del v1 (los dos, o uno con `--contrato v1|v2`) y el job informativo de CI. Los
+  scopes de sus 30 operaciones salen de ahí al arrancar; `test/contrato.spec.ts` fija la tabla.
+- **Rutas v2**: `/api/v2/vuelos/webhooks`, `/webhooks/{id}` y `/eventos` al notifier; el resto de
+  `/api/v2/vuelos/**` al core. Públicas: `health`, `search`, `seatmap` y `GET flights/{n}/status`.
+  Lo que el contrato v2 no declara es 404 en el borde. `/api/v2/oauth2/token` va a `/oauth2/token`
+  de identity con el límite estricto; `/oauth2/token` sigue igual.
+- **`X-User-*`**: se borran salvo con un token válido de partner (claim `client_id`).
+- **`X-Correlation-Id`**: se conserva el válido, se genera el que falta, va a cada upstream, vuelve
+  en toda respuesta, es atributo de los spans, va en cada línea de log y la línea de acceso suma
+  los campos de §6.4. Es la sección 7 del estándar.
+- **Errores del borde v2**: en `/api/v2/**`, el ProblemDetails v2; en el resto, el v1 sin cambios.
+- **Estándar**: suben `rpc.*`, `graphql.operation.type` y el upstream `payments`.
+- `scripts/e2e-local.sh` recorre el contrato v2 como Booking Prototipo; el smoke suma lo de v2.
+
+### Decisiones (tomadas sin consultar)
+
+1. **`/api/v2/oauth2/token` reescribe la ruta**: es la única excepción a "ninguna regla reescribe la
+   ruta", con su campo propio en la tabla (`rutaUpstream`), solo para patrones sin comodines.
+   Identity no tiene `/api/v2/oauth2/token` y el contrato lo pide (su `tokenUrl` es relativo al
+   server `/api/v2`). Se anotó en CLAUDE.md y en RUTAS.md.
+2. **`/oauth2/token` y `/api/v2/oauth2/token` comparten el contador estricto** (se cuenta por la
+   ruta de destino). Si no, un atacante tendría el doble de intentos contra el mismo endpoint.
+3. **"Se niega por defecto" en v2 es 404, no 401**: lo no declarado (otro método, otra ruta,
+   `/api/v2/docs`) responde como una ruta desconocida, sin llegar a ningún servicio y aunque traiga
+   un token válido. En v1 sigue como antes (token válido sin scopes) para no romper el backoffice.
+4. **Se borra toda `X-User-*`**, no solo `X-User-Id` y `X-User-Roles`: una cabecera de identidad
+   nueva que alguien agregue mañana tampoco debe pasar sin partner. Con partner pasan todas
+   intactas y el core las valida.
+5. **Partner = token válido con `client_id`**, igual que el core e identity. Un token de cliente con
+   `client_id` que no sea Booking (por ejemplo `core-vuelos`) también cuenta como partner en el
+   borde; sus scopes ya le impiden entrar a lo de v2, y el core decide.
+6. **El correlation id del upstream no reemplaza al del gateway** en la respuesta: el gateway borra
+   el que manda el servicio y pone el suyo (el mismo que le mandó).
+7. **Formato del correlation id: el del core** (`^[A-Za-z0-9._:-]{1,100}$`). Identity exige además
+   que empiece con letra o dígito; se anotó como divergencia en el estándar y en lo que necesitan
+   los otros repos.
+8. **CORS**: `X-Correlation-Id` permitida y expuesta; `Idempotent-Replayed` y `Location`
+   expuestas (lo pide `V2-DIFERENCIAS.md` del core). `X-User-*` no se permite en CORS: solo cuenta
+   con un token de partner, que es de servidor a servidor.
+9. **La línea de acceso conserva sus campos de la 7a** (`metodo`, `ruta`, `upstream`, `ms`,
+   `motivo`) y suma los de §6.4 en `snake_case` (`correlation_id`, `request_id`, `service`,
+   `operation`, `status`, `latency_ms`, `timestamp`). `operation` es el `operationId` del contrato
+   (v1 o v2) o `null`. Las demás líneas llevan `correlationId` (camelCase, como `requestId`), igual
+   que identity.
+10. **`instance` es la ruta pedida sin la query**, sin normalizar, como el core. **`timestamp`** sale
+    del `Reloj` (las pruebas lo fijan).
+11. **El 503 sin JWKS es `PROVIDER_UNAVAILABLE` en v2** (el core hace lo mismo con
+    `AUTH_UNAVAILABLE`). El 413 y el 405 son `VALIDATION_FAILED`.
+12. **Un error del upstream en `/api/v2` pasa tal cual**: el borde solo arma los suyos.
+13. **`graphql.root_fields` no entra a la lista común**: su conjunto cerrado es el esquema de cada
+    BFF. Si `filtrarAtributos` lo aceptara con cualquier nombre, el filtro del BFF (que se suma al
+    común) dejaría pasar alias. `rpc.service` y `rpc.method` sí entran, con su valor validado por
+    forma: los servicios los toman de su proto, no de la petición.
+14. **Ajv y ajv-formats** como dependencias de desarrollo (las mismas versiones que el core): los
+    errores v2 se validan contra el esquema del contrato, no contra una lista escrita a mano.
+15. **Verificación real con un notifier v2 falso** (`scripts/e2e/notifier-v2-falso.mjs`): responde
+    `/api/v2/vuelos/webhooks*` y `/eventos` y pasa el resto al notifier real, para que v1 siga
+    verificándose contra el de verdad.
+16. **Cada servicio con su `METRICS_PORT` en el recorrido local**: el BFF (7b) ya abre métricas y
+    chocaba con el 9464 del gateway.
+
+### Commits de la fase G2
+
+| Commit | Qué |
+| --- | --- |
+| `feat(contrato): copiar el contrato v2 del core con sync y check` | El YAML, los scripts, `RUTA_CONTRATO_V2`, el server relativo, CI e imagen |
+| `feat(rutas): enrutar /api/v2 con los scopes del contrato v2` | La tabla, el resolver con dos contratos, `rutaUpstream`, `rutas:listar` |
+| `feat(seguridad): borrar X-User-* salvo con un token válido de partner` | Cabeceras, pruebas y tres mutaciones |
+| `feat(observabilidad): propagar X-Correlation-Id y registrarlo en el acceso` | Contexto, span, logs, CORS, upstream y la sección 7 del estándar |
+| `feat(errores): responder los errores del borde en /api/v2 con el ProblemDetails v2` | `problemaV2`, Ajv y la mutación del error v1 |
+| `feat(observabilidad): subir al estándar rpc.*, graphql.* y el upstream payments` | `atributos.ts` y el estándar |
+| `test(e2e): recorrer el contrato v2 como Booking Prototipo con un X-Correlation-Id` | El recorrido 16 a 23 y el notifier falso |
+| `test(mutaciones): poner al día reintento-post, ruta-cruda y exportador-bloquea` | Las anclas que movió la fase; 29 de 29 |
+| `docs: ...` | RUTAS, DEPLOY, README, CHANGELOG, smoke y este plan |
+
+### Qué no se pudo verificar
+
+- **El notifier v2 real**: no existe todavía. `/api/v2/vuelos/webhooks*` y `/eventos` se
+  verificaron contra el notifier falso; contra el de `main` darían 404.
+- **Las operaciones v2 que el core todavía no implementa** (`promociones/contrato`,
+  `operaciones/vuelos`, `PATCH flights/{n}/status`, `PUT bookings/{id}/seats`): el borde exige su
+  scope (probado), pero el core responde 404.
+- **Un despliegue** detrás de Azure Container Apps con Booking de verdad, y la imagen de Docker con
+  los dos contratos en local (no hay Docker; el CI la construye y comprueba los dos archivos).
+
+### Hallazgos
+
+- El BFF de `main` (7b) abre su servidor de métricas en el 9464 por defecto: en una sola máquina
+  choca con el gateway. En contenedores no pasa (cada uno tiene el suyo).
+- Identity y el core no aceptan exactamente el mismo `X-Correlation-Id` (identity exige el primer
+  carácter alfanumérico). Detrás del gateway, uno como `-abc` llega igual al core e identity lo
+  reemplaza: el proceso queda partido en los logs de identity.
+- Una mutación que no compila cuenta como sobreviviente en `scripts/mutaciones.mjs` (no hay
+  pruebas que fallen, hay una suite que no corre). Así se vio que `reintento-post` había quedado
+  vieja al sumar campos a `DatosReenvio`: conviene correr todas las mutaciones al cerrar cada fase.
+- Un `X-User-Id` que manda una persona hoy no hace daño en el core (lo ignora sin `client_id`),
+  pero el notifier todavía no tiene la regla: borrarlo en el borde cierra esa puerta mientras tanto.
+
+### Pendientes
+
+- Cuando el notifier publique sus rutas v2, quitar el notifier falso del recorrido local.
+- Si el contrato v2 agrega `/api/v2/docs` o una ruta transversal, declararla en la tabla.
+
+### Lo que necesitan los otros repos (no se hizo desde aquí)
+
+| Repo | Cambio mínimo |
+| --- | --- |
+| notifier_vuelos | `GET`/`POST /api/v2/vuelos/webhooks`, `DELETE /api/v2/vuelos/webhooks/{id}` y `GET /api/v2/vuelos/eventos` con el contrato v2 (el gateway ya los enruta y exige sus scopes); leer y propagar `X-Correlation-Id` (sección 7 del estándar); ProblemDetails v2 en esas rutas |
+| identity_vuelos | Alinear el formato del `X-Correlation-Id` con el estándar (`^[A-Za-z0-9._:-]{1,100}$`); `docs/PARTNER-BOOKING.md` ya puede decir que el gateway publica `/api/v2/oauth2/token` |
+| backend_vuelos | Volver a copiar `atributos.ts` y `trazas.ts` del gateway: `rpc.*` ya está en el estándar (se quita la divergencia) y `camposDeTraza()` devuelve `correlationId` |
+| bff_vuelos | Volver a copiar `atributos.ts` y `trazas.ts`; propagar `X-Correlation-Id` al core en la metadata `x-correlation-id` |
+| Booking Prototipo | Base `https://<gateway>/api/v2`; token por `POST https://<gateway>/api/v2/oauth2/token` (`client_credentials`); mandar `X-Correlation-Id` (si no, el gateway lo genera y lo devuelve) |
+

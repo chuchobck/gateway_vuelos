@@ -11,7 +11,8 @@
  * La unión de lo que aceptan hoy los servicios (core: Authorization, Content-Type,
  * Idempotency-Key, X-Device-Fingerprint, X-Request-Id; identity: Authorization, Content-Type,
  * X-Request-Id; BFF: content-type, x-request-id, x-device-fingerprint) más traceparent y
- * tracestate para la fase 7.
+ * tracestate para la fase 7 y X-Correlation-Id (contrato v2, §6). X-User-* no: solo cuentan con un
+ * token de partner, que es de servidor a servidor (un navegador nunca las manda).
  */
 export const CABECERAS_PERMITIDAS = [
   'authorization',
@@ -21,10 +22,22 @@ export const CABECERAS_PERMITIDAS = [
   'x-device-fingerprint',
   'traceparent',
   'tracestate',
+  'x-correlation-id',
 ];
 
-/** X-Trace-Id: para que el frontend muestre con qué traza reportar un problema. */
-export const CABECERAS_EXPUESTAS = ['x-request-id', 'x-trace-id', 'retry-after'];
+/**
+ * X-Trace-Id: para que el frontend muestre con qué traza reportar un problema. X-Correlation-Id,
+ * Idempotent-Replayed (un 200 que repite una operación ya hecha) y Location (lo creado): las
+ * del contrato v2 que un cliente en el navegador necesita leer.
+ */
+export const CABECERAS_EXPUESTAS = [
+  'x-request-id',
+  'x-trace-id',
+  'retry-after',
+  'x-correlation-id',
+  'idempotent-replayed',
+  'location',
+];
 
 export const METODOS_PERMITIDOS = ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE'];
 

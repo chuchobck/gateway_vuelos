@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  Verificación real en local: identity, core (AUTH_MODE=external, WEBHOOKS_MODE=notifier),
-#  notifier, bff, este gateway y un receptor de webhooks. Después se entra SOLO por el gateway.
-#  La guía, con las salidas de una corrida, está en docs/E2E-LOCAL.md.
+#  notifier, bff, este gateway y un receptor de webhooks. Después se entra SOLO por el gateway:
+#  primero v1 (pasos 1 a 15) y después el contrato v2 como Booking Prototipo (16 a 23). Mientras
+#  el notifier no tenga sus rutas v2, un notifier falso (3003) responde /api/v2/vuelos/webhooks y
+#  /eventos y pasa el resto al notifier real. La guía, con las salidas, está en docs/E2E-LOCAL.md.
 #
 #  Uso:  scripts/e2e-local.sh --preparar     bases nuevas, claves y cliente core-vuelos; y recorre
 #        scripts/e2e-local.sh                usa lo ya preparado: arranca, recorre y apaga
@@ -96,7 +98,7 @@ detener() {
 
 puertos_libres() {
   local puerto ocupados=()
-  for puerto in 3000 3001 3002 4000 4010 4318 8080 9464 50051; do
+  for puerto in 3000 3001 3002 3003 4000 4010 4318 8080 9464 9465 9466 9467 9468 50051; do
     (echo >"/dev/tcp/127.0.0.1/$puerto") 2>/dev/null && ocupados+=("$puerto")
   done
   if [[ ${#ocupados[@]} -gt 0 ]]; then
@@ -129,11 +131,16 @@ preparar() {
   (cd "$NOTIFIER" && DATABASE_URL="$PG/notifier_db?schema=notificaciones" ./db/reset.sh >/dev/null)
   echo "  notifier: esquema cargado"
 
-  local clave_firma cliente
+  local clave_firma cliente booking
   clave_firma="$(cd "$IDENTITY" && node dist/cli/generar-claves.js | sed -n 's/^JWT_SIGNING_KEY=//p')"
   cliente="$(cd "$IDENTITY" && DATABASE_URL="$PG/identity_db?schema=identidad" \
     node dist/cli/crear-cliente.js --nombre "Core eventos (e2e)" --scopes "events:publish" \
     --permitir-eventos)"
+  # El partner del contrato v2, como lo crea docs/PARTNER-BOOKING.md de identity
+  booking="$(cd "$IDENTITY" && DATABASE_URL="$PG/identity_db?schema=identidad" \
+    node dist/cli/crear-cliente.js --nombre "Booking Prototipo" --client-id booking-prototipo \
+    --scopes "flights:read flights:hold flights:book flights:cancel flights:webhooks")"
+  echo "  identity: clientes core-vuelos (events:publish) y booking-prototipo (cinco scopes)"
   umask 077
   cat >"$ESTADO/estado.env" <<EOF
 ADMIN_EMAIL=admin@e2e.quinde.example
@@ -141,6 +148,8 @@ ADMIN_PASSWORD=$admin_clave
 JWT_SIGNING_KEY=$clave_firma
 NOTIFIER_CLIENT_ID=$(sed -n 's/^client_id: *//p' <<<"$cliente")
 NOTIFIER_CLIENT_SECRET=$(sed -n 's/^client_secret: *//p' <<<"$cliente")
+BOOKING_CLIENT_ID=$(sed -n 's/^client_id: *//p' <<<"$booking")
+BOOKING_CLIENT_SECRET=$(sed -n 's/^client_secret: *//p' <<<"$booking")
 CORE_WEBHOOK_SECRET_KEY=$(aleatorio 32)
 NOTIFIER_WEBHOOK_SECRET_KEY=$(aleatorio 32)
 BOARDING_PASS_SECRET=$(aleatorio 48)
@@ -168,7 +177,7 @@ arrancar() {
   (cd "$IDENTITY" && exec env -i PATH="$PATH" NODE_ENV=development PORT=3001 \
     DATABASE_URL="$PG/identity_db?schema=identidad" JWT_ISSUER="$GW" \
     JWT_AUDIENCE=quinde-vuelos-api JWT_SIGNING_KEY="$JWT_SIGNING_KEY" TRUST_PROXY=1 \
-    node dist/main.js) >"$LOGS/identity.log" 2>&1 &
+    METRICS_PORT=9467 node dist/main.js) >"$LOGS/identity.log" 2>&1 &
   echo $! >"$ESTADO/identity.pid"
   esperar identity http://localhost:3001/identity/v1/health
 
@@ -176,7 +185,7 @@ arrancar() {
     DATABASE_URL="$PG/notifier_db?schema=notificaciones" \
     WEBHOOK_SECRET_KEY="$NOTIFIER_WEBHOOK_SECRET_KEY" JWT_ISSUER="$GW" \
     JWT_AUDIENCE=quinde-vuelos-api JWKS_URL=http://localhost:3001/.well-known/jwks.json \
-    TRUST_PROXY=1 NOTIFIER_DELIVERY_JOB_INTERVAL_SECONDS=5 \
+    TRUST_PROXY=1 NOTIFIER_DELIVERY_JOB_INTERVAL_SECONDS=5 METRICS_PORT=9468 \
     node dist/main.js) >"$LOGS/notifier.log" 2>&1 &
   echo $! >"$ESTADO/notifier.pid"
   esperar notifier http://localhost:3002/health
@@ -188,20 +197,27 @@ arrancar() {
     WEBHOOKS_MODE=notifier NOTIFIER_URL=http://localhost:3002 \
     IDENTITY_TOKEN_URL=http://localhost:3001/oauth2/token \
     NOTIFIER_CLIENT_ID="$NOTIFIER_CLIENT_ID" NOTIFIER_CLIENT_SECRET="$NOTIFIER_CLIENT_SECRET" \
-    GRPC_ENABLED=true GRPC_PORT=50051 TRUST_PROXY=1 \
+    GRPC_ENABLED=true GRPC_PORT=50051 TRUST_PROXY=1 METRICS_PORT=9466 \
     node dist/main.js) >"$LOGS/core.log" 2>&1 &
   echo $! >"$ESTADO/core.pid"
   esperar core http://localhost:3000/flights/v1/health
 
   (cd "$BFF" && exec env -i PATH="$PATH" NODE_ENV=development PORT=4000 CORE_TRANSPORT=grpc \
-    CORE_GRPC_URL=localhost:50051 TRUST_PROXY=1 \
+    CORE_GRPC_URL=localhost:50051 TRUST_PROXY=1 METRICS_PORT=9465 \
     node dist/main.js) >"$LOGS/bff.log" 2>&1 &
   echo $! >"$ESTADO/bff.pid"
   esperar bff http://localhost:4000/health
 
+  : >"$ESTADO/notifier-v2.jsonl"
+  (exec env -i PATH="$PATH" NOTIFIER_FALSO_PORT=3003 NOTIFIER_REAL_URL=http://127.0.0.1:3002 \
+    NOTIFIER_FALSO_ARCHIVO="$ESTADO/notifier-v2.jsonl" \
+    node "$GW_DIR/scripts/e2e/notifier-v2-falso.mjs") >"$LOGS/notifier-v2-falso.log" 2>&1 &
+  echo $! >"$ESTADO/notifier-v2-falso.pid"
+  esperar notifier-v2-falso http://localhost:3003/health
+
   (cd "$GW_DIR" && exec env -i PATH="$PATH" NODE_ENV=development PORT=8080 \
     UPSTREAM_CORE_URL=http://localhost:3000 UPSTREAM_BFF_URL=http://localhost:4000 \
-    UPSTREAM_IDENTITY_URL=http://localhost:3001 UPSTREAM_NOTIFIER_URL=http://localhost:3002 \
+    UPSTREAM_IDENTITY_URL=http://localhost:3001 UPSTREAM_NOTIFIER_URL=http://localhost:3003 \
     JWT_ISSUER="$GW" CORS_ORIGINS=http://localhost:5173 TRUST_PROXY_HOPS=0 \
     OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318 METRICS_PORT=9464 \
     node dist/main.js) >"$LOGS/gateway.log" 2>&1 &
@@ -442,6 +458,146 @@ recorrer() {
   pedir DELETE "/flights/v1/webhooks/$suscripcion" -H "authorization: Bearer $token" >/dev/null || true
 }
 
+# --- 4. el contrato v2 como Booking Prototipo, con UN X-Correlation-Id -----------------------
+# Cabeceras de la respuesta (en minúsculas) y cuerpo, para ver X-Correlation-Id
+pedir_v2() {
+  local metodo="$1" ruta="$2" archivo_cab
+  shift 2
+  archivo_cab="$(mktemp "$ESTADO/cab.XXXXXX")"
+  curl -s -X "$metodo" -D "$archivo_cab" -o "$ESTADO/cuerpo.json" --path-as-is \
+    -H "x-correlation-id: $CORR" "$@" "$GW$ruta" >/dev/null
+  STATUS="$(head -n1 "$archivo_cab" | awk '{print $2}')"
+  CORR_RESPUESTA="$(tr -d '\r' <"$archivo_cab" | sed -n 's/^x-correlation-id: //Ip')"
+  CUERPO="$(cat "$ESTADO/cuerpo.json")"
+  rm -f "$archivo_cab"
+}
+
+paso_v2() {
+  local descripcion="$1" esperado="$2"
+  verificar "$descripcion" "$esperado" "$STATUS"
+  verificar '  X-Correlation-Id de la respuesta' "$CORR" "$CORR_RESPUESTA"
+}
+
+recorrer_v2() {
+  # shellcheck disable=SC1091
+  source "$ESTADO/estado.env"
+  CORR="corr-e2e-g2-$(aleatorio 9 | tr -dc 'A-Za-z0-9' | head -c 10)"
+  local token fecha oferta hold reserva persona
+
+  titulo "16. Token de Booking por /api/v2/oauth2/token (X-Correlation-Id: $CORR)"
+  if [[ -z "${BOOKING_CLIENT_SECRET:-}" ]]; then
+    verificar 'cliente booking-prototipo en estado.env' 'sí' 'no: correr con --preparar'
+    return
+  fi
+  pedir_v2 POST /api/v2/oauth2/token -u "$BOOKING_CLIENT_ID:$BOOKING_CLIENT_SECRET" \
+    -d grant_type=client_credentials
+  paso_v2 'POST /api/v2/oauth2/token (→ identity /oauth2/token)' 200
+  token="$(jq -r .access_token <<<"$CUERPO")"
+  echo "  access_token: $(corto "$token"), expires_in $(jq -r .expires_in <<<"$CUERPO")"
+  cut -d. -f2 <<<"$token" | base64 -d 2>/dev/null | jq -c '{client_id, scope, iss}' | sed 's/^/  claims: /' || true
+
+  titulo '17. health → search (públicas, sin token)'
+  pedir_v2 GET /api/v2/vuelos/health
+  paso_v2 'GET /api/v2/vuelos/health' 200
+  jq -c '{status, service: (.service // .servicio // null)}' <<<"$CUERPO" | sed 's/^/  /'
+  fecha="$(date -u -d '+3 day' +%F)"
+  pedir_v2 POST /api/v2/vuelos/search -H 'content-type: application/json' \
+    -H 'x-device-fingerprint: e2e-booking-0001' \
+    -d "{\"itineraries\":[{\"origin\":\"UIO\",\"destination\":\"GYE\",\"departureDate\":\"$fecha\"}],\"passengers\":{\"adults\":1}}"
+  paso_v2 'POST /api/v2/vuelos/search' 200
+  oferta="$(jq -c '[.offers[] | select(all(.itineraries[]; (.segments | length) == 1))][0]' <<<"$CUERPO")"
+  echo "  ofertas: $(jq '.offers | length' <<<"$CUERPO"), la elegida: $(jq -r .offerId <<<"$oferta")"
+
+  titulo '18. hold → booking (paymentReference de Booking, X-User-Id del usuario final) → tickets'
+  pedir_v2 POST /api/v2/vuelos/offers/hold -H "authorization: Bearer $token" \
+    -H 'content-type: application/json' -H "idempotency-key: $(uuid)" \
+    -d "$(jq -c '{offerId, itinerarySelections: [.itineraries[] | {itineraryId, cabinClass: .pricingOptions[0].cabinClass, fareBrand: .pricingOptions[0].fareBrand}], passengersBreakdown: {adults: 1}, ttlMinutes: 10}' <<<"$oferta")"
+  paso_v2 'POST /api/v2/vuelos/offers/hold' 201
+  hold="$(jq -r .holdId <<<"$CUERPO")"
+  pedir_v2 POST /api/v2/vuelos/bookings -H "authorization: Bearer $token" \
+    -H 'content-type: application/json' -H "idempotency-key: $(uuid)" \
+    -H 'x-user-id: booking-user-e2e-42' -H 'x-user-roles: customer' \
+    -d "{\"holdId\":\"$hold\",\"passengers\":[{\"passengerId\":\"ADU1\",\"passengerType\":\"ADULT\",\"firstName\":\"Ana\",\"lastName\":\"Prueba\",\"documentType\":\"NATIONAL_ID\",\"documentNumber\":\"1710034065\",\"nationality\":\"EC\",\"birthDate\":\"1990-04-15\",\"gender\":\"F\",\"contact\":{\"email\":\"booking-e2e@e2e.quinde.example\",\"phone\":\"+593991234567\"}}],\"payment\":{\"paymentReference\":\"BKP-E2E-$(date +%s)\"}}"
+  paso_v2 'POST /api/v2/vuelos/bookings' 201
+  reserva="$(jq -r .bookingId <<<"$CUERPO")"
+  jq -c '{bookingId, pnr, status, links: (._links | keys? // null)}' <<<"$CUERPO" | sed 's/^/  /'
+  echo "  en la base (el core recibió X-User-Id porque el token es de partner):"
+  psql "$PG/booking_db" -At -c \
+    "SELECT 'id_cliente=' || coalesce(id_cliente, 'null') || ' id_usuario_externo=' || coalesce(id_usuario_externo, 'null') FROM vuelos.reserva_cabecera WHERE id = '$reserva'" |
+    sed 's/^/    /'
+  pedir_v2 POST "/api/v2/vuelos/bookings/$reserva/tickets" -H "authorization: Bearer $token"
+  paso_v2 'POST /api/v2/vuelos/bookings/{bookingId}/tickets' 200
+  jq -c '{issued, tickets: (.tickets | length? // null)}' <<<"$CUERPO" | sed 's/^/  /'
+
+  titulo '19. cancel con SAGA_COMPENSATION (Booking compensa el combo)'
+  pedir_v2 POST "/api/v2/vuelos/bookings/$reserva/cancel" -H "authorization: Bearer $token" \
+    -H 'content-type: application/json' -H "idempotency-key: $(uuid)" \
+    -d '{"reasonCode":"SAGA_COMPENSATION"}'
+  paso_v2 'POST /api/v2/vuelos/bookings/{bookingId}/cancel' 200
+  jq -c '{status, reasonCode, refund: {status: .refund.status, amount: .refund.amount}}' <<<"$CUERPO" | sed 's/^/  /'
+
+  titulo '20. Errores del borde v2 (ProblemDetails v2 con el mismo correlation_id)'
+  pedir_v2 GET /api/v2/vuelos/bookings
+  paso_v2 'GET /api/v2/vuelos/bookings sin token' 401
+  jq -c . <<<"$CUERPO" | sed 's/^/  /'
+  pedir_v2 PATCH /api/v2/vuelos/flights/EQ101/status -H "authorization: Bearer $token" \
+    -H 'content-type: application/json' -d '{}'
+  paso_v2 'PATCH .../flights/{n}/status sin flights:ops' 403
+  jq -c '{code, correlation_id, instance}' <<<"$CUERPO" | sed 's/^/  /'
+  pedir_v2 GET /api/v2/vuelos/no-declarada -H "authorization: Bearer $token"
+  paso_v2 'GET /api/v2/vuelos/no-declarada' 404
+  jq -c '{code, correlation_id, instance}' <<<"$CUERPO" | sed 's/^/  /'
+  verificar '  correlation_id del cuerpo' "$CORR" "$(jq -r .correlation_id <<<"$CUERPO")"
+
+  titulo '21. webhooks y eventos v2 (al notifier: hoy el falso) y X-User-* de una persona'
+  pedir_v2 GET /api/v2/vuelos/webhooks -H "authorization: Bearer $token" -H 'x-user-id: booking-user-e2e-42'
+  paso_v2 'GET /api/v2/vuelos/webhooks' 200
+  pedir_v2 GET /api/v2/vuelos/eventos -H "authorization: Bearer $token"
+  paso_v2 'GET /api/v2/vuelos/eventos' 200
+  sed 's/^/  notifier falso: /' "$ESTADO/notifier-v2.jsonl"
+  r="$(pedir POST /identity/v1/auth/login -H 'content-type: application/json' \
+    -d "{\"email\":\"$ADMIN_EMAIL\",\"password\":\"$ADMIN_PASSWORD\"}")"
+  persona="$(cuerpo_de "$r" | jq -r .access_token)"
+  pedir_v2 GET /api/v2/vuelos/webhooks -H "authorization: Bearer $persona" -H 'x-user-id: otro-usuario'
+  verificar 'GET /api/v2/vuelos/webhooks con token de persona' 200 "$STATUS"
+  verificar '  X-User-Id que le llegó al notifier (persona: se borra)' 'false' \
+    "$(tail -n1 "$ESTADO/notifier-v2.jsonl" | jq -r .conXUserId)"
+
+  titulo "22. El mismo $CORR en los logs del gateway, del core y del identity"
+  sleep 1
+  local en_gateway en_core en_identity
+  en_gateway="$(grep -cF "$CORR" "$LOGS/gateway.log" || true)"
+  en_core="$(grep -cF "$CORR" "$LOGS/core.log" || true)"
+  en_identity="$(grep -cF "$CORR" "$LOGS/identity.log" || true)"
+  echo "  líneas con $CORR: gateway $en_gateway, core $en_core, identity $en_identity"
+  verificar 'gateway' 'alguna' "$([[ $en_gateway -gt 0 ]] && echo alguna || echo ninguna)"
+  verificar 'core' 'alguna' "$([[ $en_core -gt 0 ]] && echo alguna || echo ninguna)"
+  verificar 'identity' 'alguna' "$([[ $en_identity -gt 0 ]] && echo alguna || echo ninguna)"
+  echo '  gateway (líneas de acceso, campos de §6.4):'
+  grep -F "$CORR" "$LOGS/gateway.log" | grep -F '"msg":"acceso"' |
+    jq -c '{timestamp, service, correlation_id, request_id, operation, status, latency_ms, ruta, upstream}' |
+    sed 's/^/    /'
+  echo '  core (líneas de acceso):'
+  grep -F "$CORR" "$LOGS/core.log" | grep -F '"service":"core-vuelos"' | sed 's/\x1b\[[0-9;]*m//g' |
+    sed 's/^[^{]*//' | jq -c '{timestamp, service, correlation_id, operation, method, status, latency_ms, client_id}' 2>/dev/null |
+    sed 's/^/    /'
+  echo '  identity:'
+  grep -F "$CORR" "$LOGS/identity.log" | sed 's/\x1b\[[0-9;]*m//g' | cut -c1-260 | sed 's/^/    /'
+
+  titulo '23. El correlation id en el span del gateway (recolector OTLP)'
+  local spans_corr=''
+  for _ in $(seq 1 20); do
+    spans_corr="$(grep -cF "\"quinde.correlation_id\":\"$CORR\"" "$ESTADO/spans.jsonl" || true)"
+    [[ ${spans_corr:-0} -gt 0 ]] && break
+    sleep 0.5
+  done
+  verificar "spans con quinde.correlation_id=$CORR" 'alguno' "$([[ ${spans_corr:-0} -gt 0 ]] && echo alguno || echo ninguno)"
+  grep -F "\"quinde.correlation_id\":\"$CORR\"" "$ESTADO/spans.jsonl" | grep -F '"tipo":2' | head -n 3 |
+    jq -c '{nombre, atributos}' | sed 's/^/  /'
+  verificar 'tokens de Booking en los logs y los spans' 0 \
+    "$(cat "$LOGS"/*.log "$ESTADO/spans.jsonl" | grep -cF "$token" || true)"
+}
+
 case "${1:-}" in
   --detener)
     detener
@@ -455,6 +611,7 @@ detener
 puertos_libres
 arrancar
 recorrer
+recorrer_v2
 
 titulo "Resultado: $([[ $fallos -eq 0 ]] && echo 'todo bien' || echo "$fallos fallo(s)") (logs en $LOGS)"
 exit "$fallos"

@@ -109,10 +109,29 @@ Cada servicio abre:
 | `http.request.method` | El método, de la lista conocida, o `_OTHER` |
 | `http.route` | La **plantilla**, o `__unmatched__` |
 | `http.response.status_code` | El status |
-| `quinde.upstream` | `core`, `bff`, `identity` o `notifier` |
+| `quinde.upstream` | `core`, `bff`, `identity`, `notifier` o `payments` (la Payment API, a la que llama el core) |
 | `quinde.auth.mode` | `publica` o `token` |
 | `quinde.request_id` | El X-Request-Id |
+| `quinde.correlation_id` | El X-Correlation-Id (sección 7). Solo en spans y logs, **nunca** como etiqueta de una métrica |
 | `error.type` | Uno de una lista cerrada: `timeout`, `unavailable`, `invalid_token`, `missing_token`, `expired_token`, `insufficient_scope`, `jwks_unavailable`, `500` a `504` |
+| `rpc.system` | `grpc` (span de una llamada gRPC: SERVER en el core, CLIENT en el BFF) |
+| `rpc.service` | El servicio del proto: `quinde.flights.v1.FlightsService`. Nunca de la petición |
+| `rpc.method` | La RPC del proto: `SearchFlights`, `GetSeatMap`, `GetFlightStatus` |
+| `rpc.grpc.status_code` | El código gRPC, de 0 a 16 |
+| `graphql.operation.type` | `query`, `mutation` o `subscription` (el span INTERNAL de una operación del BFF) |
+
+`filtrarAtributos` valida también el **valor** de `error.type`, `rpc.*` y `graphql.operation.type`: un
+texto con otra forma se descarta.
+
+**Atributos propios de un servicio**, sumados a los de arriba con su propio filtro y su conjunto
+cerrado de valores:
+
+| Servicio | Atributo | Valores |
+| --- | --- | --- |
+| bff | `graphql.root_fields` | Los campos raíz de su esquema que pide la operación (`searchFlights,seatMap`); otro nombre, un alias o un campo inventado es `__other__` (`src/telemetria/atributos-bff.ts`). No va en la lista común porque su conjunto cerrado es el esquema de cada BFF |
+
+Un servicio que necesite otro atributo lo propone aquí primero (como el core con `rpc.*` en la 7c y el
+BFF con `graphql.*` en la 7b): mientras no esté en esta tabla, es una divergencia anotada en su README.
 
 **Prohibido en spans, logs y métricas:**
 
@@ -132,11 +151,26 @@ Cada servicio abre:
 
 Cada línea es JSON y lleva:
 
-- `requestId`, `traceId` y `spanId` en **toda** línea escrita durante una petición, también en las de
-  código que no recibe la petición (el verificador de tokens, un repositorio). Se toman del contexto
-  activo (`camposDeTraza()`), no de la petición.
-- La línea de acceso: `requestId`, `traceId`, `spanId`, método, **plantilla** de la ruta (no la ruta
-  pedida), upstream si lo hay, status y ms.
+- `requestId`, `correlationId`, `traceId` y `spanId` en **toda** línea escrita durante una petición,
+  también en las de código que no recibe la petición (el verificador de tokens, un repositorio). Se
+  toman del contexto activo (`camposDeTraza()`), no de la petición.
+- La línea de acceso, una por petición, con los campos del contrato v2 (§6, regla 4) en
+  `snake_case` y con estos nombres exactos en los cinco servicios, para poder juntarlas por
+  `correlation_id`:
+
+  | Campo | Qué lleva |
+  | --- | --- |
+  | `correlation_id` | El X-Correlation-Id (sección 7) |
+  | `request_id` | El X-Request-Id |
+  | `service` | El `service.name` de la sección 1 |
+  | `operation` | El `operationId` del contrato (`createBooking`), o `null` fuera de los contratos |
+  | `status` | El status de la respuesta |
+  | `latency_ms` | Lo que tardó, en ms con un decimal |
+  | `timestamp` | ISO 8601 UTC |
+
+  Además, cada servicio agrega lo suyo sin URL, query, cuerpo ni usuario. En el gateway: `metodo`,
+  la **plantilla** de la ruta (`ruta`, no la ruta pedida), `upstream`, `ms` y `motivo` si lo
+  respondió el borde.
 
 Fuera de una petición (el arranque, una tarea programada) no hay `traceId`, salvo que la tarea abra
 su propio span.
@@ -153,7 +187,7 @@ existe: el gateway lo bloquea como `/internal`.
 | --- | --- | --- |
 | `http_server_request_duration_seconds` | histograma | `method`, `route`, `status` |
 | `http_server_requests_total` | contador | `method`, `route`, `status` |
-| `http_client_request_duration_seconds` | histograma | `upstream`, `method`, `status` (código o `error`) |
+| `http_client_request_duration_seconds` | histograma | `upstream` (`core`, `bff`, `identity`, `notifier`, `payments`), `method`, `status` (código o `error`) |
 | `quinde_build_info` | gauge (siempre 1) | `service`, `version`, `environment` |
 | por defecto de `prom-client` | varias | `process_*`, `nodejs_*` |
 
@@ -190,11 +224,17 @@ prefijo (`core_`, `notifier_`...) y las mismas reglas de cardinalidad.
 3. **Middleware de Express, el primero de todos** (el equivalente de `src/observabilidad/fastify.ts`):
    - abrir el span `SERVER` con `trazas.contextoEntrante(req.headers.traceparent)` como padre;
    - poner el requestId en el contexto (`CLAVE_REQUEST_ID`) y la cabecera `X-Trace-Id`;
+   - resolver el `X-Correlation-Id` (sección 7), ponerlo en el contexto (`CLAVE_CORRELATION_ID`),
+     en el span (`quinde.correlation_id`) y en la cabecera de la respuesta;
    - llamar a `next()` dentro de `trazas.enContexto(...)`;
    - en `res.on('finish')`: plantilla = `req.route?.path` con el prefijo y la versión, o
      `__unmatched__`. Nombrar el span, cerrarlo y `metricas.registrarServidor(...)`.
-4. **gRPC (core):** en el interceptor de contexto gRPC, lo mismo con la metadata `traceparent`. La
-   plantilla es el nombre de la RPC: `flights.v1.FlightsService/SearchFlights`.
+4. **gRPC (core):** en el interceptor de contexto gRPC, lo mismo con la metadata `traceparent` (y
+   `x-correlation-id`, sección 7). El nombre del span es la RPC
+   (`quinde.flights.v1.FlightsService/SearchFlights`), con `rpc.system`, `rpc.service`, `rpc.method`
+   y, al cerrar, `rpc.grpc.status_code`. El BFF pone los mismos en su span CLIENT hacia el core.
+   **Payment API (core):** su span CLIENT lleva `quinde.upstream=payments` y la plantilla de la
+   ruta (`POST /payments/authorize`, `GET /payments/{reference}`).
 5. **Logger** (`LoggerPorPeticion` del core, el del BFF): agregar `traceId` y `spanId` de
    `camposDeTraza()` a cada línea.
 6. **Llamadas salientes:**
@@ -220,3 +260,49 @@ emite el gateway:
 - el texto de `/metrics`.
 
 Las dos verificaciones están en las pruebas y en el recorrido local (`docs/E2E-LOCAL.md`).
+
+## 7. Correlación: `X-Correlation-Id`
+
+Contrato v2, §6. `X-Correlation-Id` identifica **todo un proceso de negocio** (una compra completa:
+hold, reserva, boletos, cancelación). `X-Request-Id` identifica un solo salto y `traceparent`, la traza
+técnica. Los tres conviven.
+
+**Formato y origen** (el mismo en los cinco servicios):
+
+- Válido: `^[A-Za-z0-9._:-]{1,100}$`. 100 es el `maxLength` del contrato. Lo demás podría falsear una
+  línea de log (saltos de línea, espacios, comillas) o una cabecera.
+- Si llega válido, **se conserva sin cambios**: ni minúsculas, ni prefijo, ni recorte.
+- Si falta, no es válido o llega repetido, **se genera** `corr-<uuid v4>`. Nunca se rechaza la
+  petición por esto.
+- **Lo genera el primero que lo recibe sin él.** Detrás del gateway, siempre llega válido; un servicio
+  interno igual lo valida (defensa en profundidad) y lo genera si hace falta (un proceso periódico,
+  una llamada directa en la red interna).
+- Divergencia conocida: identity exige además que empiece con letra o dígito
+  (`^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$`). Un id que el gateway acepta y empieza con `.`, `_`, `:` o
+  `-` identity lo reemplaza. Se corrige en identity (pendiente para su repo).
+
+**Dónde va:**
+
+| Lugar | Cómo |
+| --- | --- |
+| Respuesta | Cabecera `X-Correlation-Id` en **toda** respuesta, también en los errores del borde (400, 401, 403, 404, 413, 429, 502, 503, 504). En el gateway, expuesta por CORS y permitida como cabecera de entrada. El del upstream no reemplaza al del gateway |
+| Error v2 | `ProblemDetails.correlation_id` (en `/api/v2/**`). Los errores v1 no lo llevan en el cuerpo (su esquema no lo admite), solo en la cabecera |
+| Span | Atributo `quinde.correlation_id` en el `SERVER` y en cada `CLIENT` |
+| Log | `correlationId` en toda línea de la petición; `correlation_id` en la línea de acceso (sección 3) |
+| Métricas | **Nunca**: no es una etiqueta (cardinalidad sin tope) |
+
+**Propagación por protocolo** (contrato v2, §6, regla 3). Se propaga **sin modificarse** por todas las
+capas:
+
+| Protocolo | Dónde viaja |
+| --- | --- |
+| HTTP/REST | Cabecera `X-Correlation-Id`. Todo salto HTTP entre servicios Quinde la manda, incluida la llamada del core a la Payment API y su POST al notifier |
+| gRPC (bff → core) | Metadata `x-correlation-id` (en minúsculas, como pide gRPC) |
+| SOAP | `<soap:Header><corr:CorrelationId>corr-123</corr:CorrelationId></soap:Header>` |
+| RabbitMQ | Propiedad AMQP `correlation_id` + atributo `correlationid` del CloudEvent |
+| Kafka | Header `correlationid` + atributo `correlationid` del CloudEvent |
+| Bandeja del core → notifier | `evento_saliente.correlation_id` (el de la petición que causó el hecho) y la cabecera de la publicación |
+| Webhook a un tercero | La extensión `correlationid` del CloudEvent cuando el notifier la publique. Es un id de negocio, no la estructura interna: sí puede salir (a diferencia del `traceparent`) |
+
+Hoy, en Quinde, se usan HTTP, gRPC y la bandeja; SOAP, RabbitMQ y Kafka se copian del contrato para
+el servicio que los use primero.

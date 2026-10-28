@@ -1,8 +1,9 @@
 // npm run rutas:listar [-- --markdown]
 // Imprime la tabla de rutas del gateway tal como la aplica: ruta, método, destino, seguridad y
-// scopes. Las operaciones del core salen de la copia de su OpenAPI (contracts/), igual que al
-// arrancar. Con --markdown, la tabla de docs/RUTAS.md.
-import { ContratoCore } from '../rutas/contrato-core';
+// scopes. Las operaciones del core salen de las copias de sus OpenAPI v1 y v2 (contracts/), igual
+// que al arrancar. Con --markdown, la tabla de docs/RUTAS.md.
+import { ContratoCore, RUTA_CONTRATO_V2 } from '../rutas/contrato-core';
+import { Contratos } from '../rutas/resolver-ruta';
 import { RUTAS_BLOQUEADAS, TABLA_RUTAS } from '../rutas/tabla-rutas';
 
 interface Fila {
@@ -13,7 +14,7 @@ interface Fila {
   scopes: string;
 }
 
-export function filasDeRutas(contrato: ContratoCore): Fila[] {
+export function filasDeRutas(contratos: Contratos): Fila[] {
   const filas: Fila[] = RUTAS_BLOQUEADAS.map((patron) => ({
     ruta: patron,
     metodo: '*',
@@ -28,16 +29,15 @@ export function filasDeRutas(contrato: ContratoCore): Fila[] {
       filas.push({
         ruta: regla.patron,
         metodo: regla.destino === 'gateway' ? 'GET' : '*',
-        destino: regla.destino,
+        destino: regla.rutaUpstream ? `${regla.destino} → ${regla.rutaUpstream}` : regla.destino,
         seguridad: regla.seguridad.modo + extra,
         scopes: regla.seguridad.modo === 'token' ? regla.seguridad.scopes.join(' ') : '',
       });
       continue;
     }
-    // Las operaciones del contrato que caen en esta regla (las de /webhooks van antes al notifier)
-    const prefijo = regla.patron.replace(/\/\*\*$/, '');
-    for (const operacion of contrato.operaciones) {
-      if (!operacion.plantilla.startsWith(prefijo + '/')) continue;
+    // Las operaciones del contrato que caen primero en esta regla (las de /webhooks van al notifier)
+    const { contrato, noDeclarada } = regla.seguridad;
+    for (const operacion of contratos[contrato].operaciones) {
       const clave = operacion.plantilla.toLowerCase();
       const primera = TABLA_RUTAS.find((r) => coincideConPlantilla(r.patron, clave));
       if (primera !== regla) continue;
@@ -45,15 +45,17 @@ export function filasDeRutas(contrato: ContratoCore): Fila[] {
         ruta: operacion.plantilla,
         metodo: operacion.metodo,
         destino: regla.destino,
-        seguridad: operacion.publica ? 'publica (contrato)' : 'token (contrato)',
+        seguridad: operacion.publica
+          ? `publica (contrato ${contrato})`
+          : `token (contrato ${contrato})`,
         scopes: operacion.publica ? '' : operacion.alternativas.map((a) => a.join(' ')).join(' | '),
       });
     }
     filas.push({
       ruta: regla.patron,
       metodo: '*',
-      destino: regla.destino,
-      seguridad: 'token (fuera del contrato)',
+      destino: noDeclarada === 'negar' ? '— (404)' : regla.destino,
+      seguridad: `${noDeclarada === 'negar' ? 'negada' : 'token'} (fuera del contrato ${contrato})`,
       scopes: '',
     });
   }
@@ -108,9 +110,15 @@ function imprimir(filas: Fila[], markdown: boolean): void {
 }
 
 if (require.main === module) {
-  const contrato = ContratoCore.leer();
-  console.log(
-    `Contrato del core: ${contrato.version} (${contrato.operaciones.length} operaciones)\n`,
-  );
-  imprimir(filasDeRutas(contrato), process.argv.includes('--markdown'));
+  const contratos: Contratos = {
+    v1: ContratoCore.leer(),
+    v2: ContratoCore.leer(RUTA_CONTRATO_V2),
+  };
+  for (const [nombre, contrato] of Object.entries(contratos)) {
+    console.log(
+      `Contrato ${nombre} del core: ${contrato.version} (${contrato.operaciones.length} operaciones)`,
+    );
+  }
+  console.log('');
+  imprimir(filasDeRutas(contratos), process.argv.includes('--markdown'));
 }

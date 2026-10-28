@@ -23,6 +23,8 @@ const CLIENTE = 'src/proxy/cliente-upstream.ts';
 const REQUEST_ID = 'src/common/request-id.ts';
 const TRAZAS = 'src/observabilidad/trazas.ts';
 const GANCHO = 'src/observabilidad/fastify.ts';
+const TABLA = 'src/rutas/tabla-rutas.ts';
+const CORRELACION = 'src/common/correlation-id.ts';
 
 const RUTAS = 'test/rutas.spec.ts';
 const AUTH = 'test/auth.spec.ts';
@@ -33,6 +35,10 @@ const ESCANEO = 'test/escaneo.spec.ts';
 const TRAZAS_PRUEBA = 'test/trazas.spec.ts';
 const METRICAS_PRUEBA = 'test/metricas.spec.ts';
 const RESILIENCIA = 'test/resiliencia.spec.ts';
+const V2_RUTAS = 'test/v2-rutas.spec.ts';
+const PARTNER = 'test/usuario-partner.spec.ts';
+const CORRELACION_PRUEBA = 'test/correlacion.spec.ts';
+const ERRORES_V2 = 'test/errores-v2.spec.ts';
 
 /**
  * nombre, cambios por archivo [{ archivo, cambios: [buscar, reemplazar] }], prueba y filtro (-t)
@@ -181,7 +187,7 @@ const MUTACIONES = [
         cambios: [
           [
             '    } catch (error) {\n      const errorBorde = errorDeUpstream(error, contexto, peticion);',
-            "    } catch (primero) {\n      try {\n        respuestaUpstream = await cliente.reenviar({ metodo: peticion.method, rutaYQuery: ruta.ruta, cabeceras: cabecerasHaciaUpstream(peticion.headers, { requestId: peticion.id, ipCliente: contexto.ip, esquema: 'http', hostPublico: undefined, hostUpstream: cliente.host, traceparent: traceparentDe(spanUpstream) }), cuerpo: undefined, cuerpoMaximo: regla.cuerpoMaximo });\n      } catch {\n      const error = primero;\n      const errorBorde = errorDeUpstream(error, contexto, peticion);",
+            "    } catch (primero) {\n      try {\n        respuestaUpstream = await cliente.reenviar({ metodo: peticion.method, rutaYQuery: ruta.ruta, cabeceras: cabecerasHaciaUpstream(peticion.headers, { requestId: peticion.id, ipCliente: contexto.ip, esquema: 'http', hostPublico: undefined, hostUpstream: cliente.host, traceparent: traceparentDe(spanUpstream), partner: false, correlationId: 'corr-x' }), cuerpo: undefined, cuerpoMaximo: regla.cuerpoMaximo });\n      } catch {\n      const error = primero;\n      const errorBorde = errorDeUpstream(error, contexto, peticion);",
           ],
           [
             "      terminarUpstream('error');\n      throw errorBorde;\n    }",
@@ -323,8 +329,8 @@ const MUTACIONES = [
         archivo: APP,
         cambios: [
           [
-            "    if (decision.tipo === 'ruta') fijarRuta(peticion, decision.plantilla);",
-            '    fijarRuta(peticion, ruta.ruta);',
+            "    if (decision.tipo === 'ruta') {\n      fijarRuta(peticion, decision.plantilla);",
+            "    fijarRuta(peticion, ruta.ruta);\n    if (decision.tipo === 'ruta') {",
           ],
         ],
       },
@@ -382,14 +388,97 @@ const MUTACIONES = [
         archivo: GANCHO,
         cambios: [
           [
-            '    const observacion = peticion.observacion;\n    if (observacion) respuesta.header(',
-            '    await (trazas as unknown as { proveedor: { forceFlush(): Promise<void> } }).proveedor.forceFlush();\n    const observacion = peticion.observacion;\n    if (observacion) respuesta.header(',
+            '    const observacion = peticion.observacion;\n    if (observacion) {\n      respuesta.header(CABECERA_TRACE_ID',
+            '    await (trazas as unknown as { proveedor: { forceFlush(): Promise<void> } }).proveedor.forceFlush();\n    const observacion = peticion.observacion;\n    if (observacion) {\n      respuesta.header(CABECERA_TRACE_ID',
           ],
         ],
       },
     ],
     prueba: RESILIENCIA,
     filtro: 'recolector lento',
+  },
+  {
+    nombre: 'x-user-sin-partner: X-User-Id y X-User-Roles pasan con cualquier token o sin él',
+    archivos: [
+      {
+        archivo: CABECERAS,
+        cambios: [
+          ['    if (nombre.startsWith(PREFIJO_USUARIO) && !datos.partner) continue;\n', ''],
+        ],
+      },
+    ],
+    prueba: PARTNER,
+    filtro: 'se borran',
+  },
+  {
+    nombre: 'v2-sin-scopes: las rutas /api/v2 quedan públicas (sin el contrato v2)',
+    archivos: [
+      {
+        archivo: TABLA,
+        cambios: [
+          [
+            "const CONTRATO_V2: Seguridad = { modo: 'contrato', contrato: 'v2', noDeclarada: 'negar' };",
+            "const CONTRATO_V2: Seguridad = { modo: 'publica' };",
+          ],
+        ],
+      },
+    ],
+    prueba: V2_RUTAS,
+    filtro: 'sin token → 401',
+  },
+  {
+    nombre: 'v2-no-declarada-pasa: lo que el contrato v2 no declara llega al core con un token',
+    archivos: [
+      {
+        archivo: RESOLVER,
+        cambios: [["if (seguridad.noDeclarada === 'negar') return { tipo: 'no-declarada' };", '']],
+      },
+    ],
+    prueba: V2_RUTAS,
+    filtro: 'no está en el contrato v2',
+  },
+  {
+    nombre: 'correlation-cambiado: el X-Correlation-Id recibido se "normaliza" a minúsculas',
+    archivos: [
+      {
+        archivo: CORRELACION,
+        cambios: [
+          [
+            'return esCorrelationIdValido(valor) ? valor : `corr-${randomUUID()}`;',
+            'return esCorrelationIdValido(valor) ? valor.toLowerCase() : `corr-${randomUUID()}`;',
+          ],
+        ],
+      },
+    ],
+    prueba: CORRELACION_PRUEBA,
+    filtro: 'se conserva sin cambios',
+  },
+  {
+    nombre: 'correlation-sin-error: un error no devuelve el X-Correlation-Id',
+    archivos: [
+      {
+        archivo: GANCHO,
+        cambios: [
+          [
+            '      respuesta.header(CABECERA_CORRELATION_ID, observacion.correlationId);',
+            '      if (respuesta.statusCode < 400) {\n        respuesta.header(CABECERA_CORRELATION_ID, observacion.correlationId);\n      }',
+          ],
+        ],
+      },
+    ],
+    prueba: CORRELACION_PRUEBA,
+    filtro: 'en los errores del borde',
+  },
+  {
+    nombre: 'error-v1-en-v2: un error del borde en /api/v2 sale con el ProblemDetails v1',
+    archivos: [
+      {
+        archivo: APP,
+        cambios: [['return esRutaV2(urlCruda)', 'return false && esRutaV2(urlCruda)']],
+      },
+    ],
+    prueba: ERRORES_V2,
+    filtro: 'errores del borde en /api/v2',
   },
 ];
 const filtroNombre = process.argv[2];
