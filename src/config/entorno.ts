@@ -42,6 +42,18 @@ export interface Configuracion {
     estrictoVentanaSegundos: number;
     estricto: number;
   };
+  /**
+   * El puente de eventos HTTP → AMQP (fase 4a). Sin RABBITMQ_URL no existe: el listener interno
+   * no arranca y el gateway funciona igual.
+   */
+  eventos?: {
+    /** RABBITMQ_URL (amqp:// o amqps://). Lleva credenciales: nunca al log ni a un mensaje. */
+    rabbitmqUrl: string;
+    /** EVENTOS_PUERTO: listener interno aparte de PORT, que el ingress nunca expone. */
+    puerto: number;
+    /** EVENTOS_EXCHANGE: el exchange topic durable donde se publica. */
+    exchange: string;
+  };
   /** Trazas y métricas (docs/OBSERVABILIDAD.md). */
   observabilidad: {
     /** `service.name` (OTEL_SERVICE_NAME): quinde-gateway. */
@@ -79,6 +91,7 @@ export const VENTANA_POR_DEFECTO_SEGUNDOS = 60;
 export const SALTOS_MAXIMOS = 10;
 export const SERVICIO_POR_DEFECTO = 'quinde-gateway';
 export const PUERTO_METRICAS_POR_DEFECTO = 9464;
+export const EXCHANGE_POR_DEFECTO = 'vuelos.eventos';
 /** Todas las trazas en desarrollo; una de cada diez en producción. */
 export const MUESTREO_POR_DEFECTO = { desarrollo: 1, produccion: 0.1 };
 
@@ -196,6 +209,28 @@ export function leerEntorno(variables: Variables = process.env): Configuracion {
     errores.push('METRICS_PORT debe ser distinto de PORT (el ingress solo expone PORT)');
   }
 
+  // El puente de eventos: solo existe con RABBITMQ_URL. Un mensaje nombra la variable, nunca la URL
+  // (lleva el usuario y la contraseña del broker).
+  let eventos: Configuracion['eventos'];
+  const rabbitmqUrl = texto('RABBITMQ_URL');
+  if (rabbitmqUrl !== undefined) {
+    const exchange = texto('EVENTOS_EXCHANGE') ?? EXCHANGE_POR_DEFECTO;
+    if (!/^[A-Za-z0-9._-]{1,255}$/.test(exchange)) {
+      errores.push('EVENTOS_EXCHANGE debe usar solo letras, dígitos, punto, guion y guion bajo');
+    }
+    if (!esUrlAmqp(rabbitmqUrl)) errores.push('RABBITMQ_URL debe ser una URL amqp:// o amqps://');
+    const puertoEventos = texto('EVENTOS_PUERTO');
+    if (puertoEventos === undefined) {
+      errores.push('EVENTOS_PUERTO es obligatoria con RABBITMQ_URL');
+    } else {
+      const numero = entero('EVENTOS_PUERTO', 0, 1, 65_535);
+      if (numero === puerto || numero === puertoMetricas) {
+        errores.push('EVENTOS_PUERTO debe ser distinto de PORT y de METRICS_PORT');
+      }
+      eventos = { rabbitmqUrl, puerto: numero, exchange };
+    }
+  }
+
   const configuracion: Configuracion = {
     produccion,
     puerto,
@@ -208,6 +243,7 @@ export function leerEntorno(variables: Variables = process.env): Configuracion {
       jwksUrl,
     },
     corsOrigenes,
+    ...(eventos ? { eventos } : {}),
     saltosProxy: entero('TRUST_PROXY_HOPS', 0, 0, SALTOS_MAXIMOS),
     limites: {
       ventanaSegundos: entero('RATE_LIMIT_WINDOW_SECONDS', VENTANA_POR_DEFECTO_SEGUNDOS, 1, 86_400),
@@ -240,6 +276,16 @@ export function esOrigen(valor: string): boolean {
   try {
     const url = new URL(valor);
     return (url.protocol === 'http:' || url.protocol === 'https:') && url.origin === valor;
+  } catch {
+    return false;
+  }
+}
+
+/** `amqp://usuario:clave@host:5672/vhost`: el esquema de RabbitMQ, con o sin TLS. */
+function esUrlAmqp(valor: string): boolean {
+  try {
+    const url = new URL(valor);
+    return (url.protocol === 'amqp:' || url.protocol === 'amqps:') && url.hostname !== '';
   } catch {
     return false;
   }
