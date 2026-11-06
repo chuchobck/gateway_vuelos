@@ -359,7 +359,7 @@ async function leerCuerpo(peticion: IncomingMessage, maximo: number): Promise<Bu
 function leerSobre(contenido: Buffer): { eventId: string; eventType: string } {
   let sobre: unknown;
   try {
-    const texto = new TextDecoder('utf-8', { fatal: true }).decode(contenido);
+    const texto = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(contenido);
     sobre = JSON.parse(texto);
   } catch {
     throw new ErrorBorde(400, 'The request body is not valid JSON', { motivo: 'invalid_json' });

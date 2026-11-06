@@ -3,6 +3,7 @@ import { Server } from 'node:http';
 import { AddressInfo } from 'node:net';
 import { Writable } from 'node:stream';
 import { construirApp } from '../../src/app';
+import { PuenteAmqp } from '../../src/eventos/puente-amqp';
 import { leerEntorno, NombreUpstream, UPSTREAMS } from '../../src/config/entorno';
 import { servidorMetricas } from '../../src/observabilidad/metricas';
 import { ReglaRuta } from '../../src/rutas/tabla-rutas';
@@ -61,6 +62,12 @@ export class GatewayDePrueba {
   esperaLoteMs = 20;
   /** El servidor de /metrics, en su propio puerto (como METRICS_PORT). */
   baseMetricas!: string;
+  /** El listener interno de eventos (fase 4a), si hay RABBITMQ_URL en las variables. */
+  baseEventos?: string;
+  /** Solo pruebas de eventos: el puente con un broker falso (en lugar de amqplib). */
+  puenteEventos?: PuenteAmqp;
+  /** Si se arranca la conexión al broker junto con el gateway (como hace main.ts). */
+  iniciarPuente = true;
   private metricas?: Server;
 
   constructor(
@@ -105,10 +112,17 @@ export class GatewayDePrueba {
       destinoLogs,
       esperaLoteMs: this.esperaLoteMs,
       ...(this.tabla ? { tabla: this.tabla } : {}),
+      ...(this.puenteEventos ? { puenteEventos: this.puenteEventos } : {}),
     });
     await this.app.listen({ port: 0, host: '127.0.0.1' });
     const { port } = this.app.server.address() as AddressInfo;
     this.base = `http://127.0.0.1:${port}`;
+
+    if (this.app.eventos) {
+      await this.app.eventos.servidor.escuchar(0, '127.0.0.1');
+      this.baseEventos = `http://127.0.0.1:${this.app.eventos.servidor.direccion()!.port}`;
+      if (this.iniciarPuente) this.app.eventos.puente.iniciar();
+    }
 
     this.metricas = servidorMetricas(this.app.observabilidad.metricas);
     await new Promise<void>((listo) => this.metricas!.listen(0, '127.0.0.1', listo));
@@ -118,6 +132,11 @@ export class GatewayDePrueba {
 
   pedir(pedido: Pedido): Promise<Respuesta> {
     return pedir(this.base, pedido);
+  }
+
+  /** Una petición al listener interno de eventos. */
+  pedirEventos(pedido: Pedido): Promise<Respuesta> {
+    return pedir(this.baseEventos!, pedido);
   }
 
   /** El texto de /metrics, por su puerto aparte. */

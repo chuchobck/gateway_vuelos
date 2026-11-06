@@ -39,6 +39,9 @@ const V2_RUTAS = 'test/v2-rutas.spec.ts';
 const PARTNER = 'test/usuario-partner.spec.ts';
 const CORRELACION_PRUEBA = 'test/correlacion.spec.ts';
 const ERRORES_V2 = 'test/errores-v2.spec.ts';
+const PUENTE = 'src/eventos/puente-amqp.ts';
+const SERVIDOR_EVENTOS = 'src/eventos/servidor-eventos.ts';
+const EVENTOS_PRUEBA = 'test/eventos.spec.ts';
 
 /**
  * nombre, cambios por archivo [{ archivo, cambios: [buscar, reemplazar] }], prueba y filtro (-t)
@@ -479,6 +482,75 @@ const MUTACIONES = [
     ],
     prueba: ERRORES_V2,
     filtro: 'errores del borde en /api/v2',
+  },
+
+  // --- puente de eventos HTTP → AMQP (fase 4a) -----------------------------------------------
+  {
+    nombre: 'eventos-sin-confirmar: un nack del broker se da por publicado (202)',
+    archivos: [
+      {
+        archivo: PUENTE,
+        cambios: [
+          ["if (error) terminar(new ErrorPublicacion('rejected'));", 'if (error) terminar();'],
+        ],
+      },
+    ],
+    prueba: EVENTOS_PRUEBA,
+    filtro: 'el broker rechaza',
+  },
+  {
+    nombre: 'eventos-plazo: sin confirmación en 5 s se responde 202 en lugar de 503',
+    archivos: [
+      {
+        archivo: PUENTE,
+        cambios: [
+          [
+            "const vencimiento = setTimeout(() => terminar(new ErrorPublicacion('timeout')), plazo);",
+            'const vencimiento = setTimeout(() => terminar(), plazo);',
+          ],
+        ],
+      },
+    ],
+    prueba: EVENTOS_PRUEBA,
+    filtro: 'sin confirmación en el plazo',
+  },
+  {
+    nombre: 'eventos-reserializa: el cuerpo publicado ya no es el recibido byte a byte',
+    archivos: [
+      {
+        archivo: SERVIDOR_EVENTOS,
+        cambios: [
+          [
+            '        contenido,\n        messageId: eventId,',
+            '        contenido: Buffer.from(JSON.stringify(JSON.parse(contenido.toString()))),\n        messageId: eventId,',
+          ],
+        ],
+      },
+    ],
+    prueba: EVENTOS_PRUEBA,
+    filtro: 'idéntico byte a byte',
+  },
+  {
+    nombre: 'eventos-persona: el token de una persona con events:publish publica',
+    archivos: [
+      {
+        archivo: SERVIDOR_EVENTOS,
+        cambios: [['if (identidad?.clienteId === undefined) {', 'if (false) {']],
+      },
+    ],
+    prueba: EVENTOS_PRUEBA,
+    filtro: 'token de una persona',
+  },
+  {
+    nombre: 'eventos-sin-return: lo que ninguna cola recibió se da por publicado',
+    archivos: [
+      {
+        archivo: PUENTE,
+        cambios: [['else if (this.devueltos.has(mensaje.messageId)) {', 'else if (false) {']],
+      },
+    ],
+    prueba: EVENTOS_PRUEBA,
+    filtro: 'ninguna cola recibe el mensaje',
   },
 ];
 const filtroNombre = process.argv[2];
