@@ -70,6 +70,8 @@ export const ESPERA_INICIAL_MS = 1_000;
 export const ESPERA_MAXIMA_MS = 30_000;
 /** Publicaciones esperando confirmación a la vez: más que esto, 503 en lugar de acumular. */
 export const PENDIENTES_MAXIMOS = 1_000;
+/** Tope del intento completo (conexión + canal + exchange): si vence, se cierra lo abierto y se reintenta. */
+export const PLAZO_INTENTO_MS = 10_000;
 
 export interface OpcionesPuente {
   /** RABBITMQ_URL: lleva credenciales, así que NUNCA se registra ni va a un mensaje de error. */
@@ -78,6 +80,7 @@ export interface OpcionesPuente {
   conector: ConectorAmqp;
   registro: Registro;
   plazoConfirmacionMs?: number;
+  plazoIntentoMs?: number;
   esperaInicialMs?: number;
   esperaMaximaMs?: number;
 }
@@ -206,19 +209,32 @@ export class PuenteAmqp {
   private async conectar(): Promise<void> {
     if (this.detenido) return;
     let conexion: ConexionAmqp | undefined;
-    try {
+    const intento = { vencido: false };
+    let vencimiento: NodeJS.Timeout | undefined;
+    const tope = new Promise<never>((_, rechazar) => {
+      vencimiento = setTimeout(() => {
+        intento.vencido = true;
+        rechazar(Object.assign(new Error('plazo'), { code: 'ATTEMPT_TIMEOUT' }));
+      }, this.opciones.plazoIntentoMs ?? PLAZO_INTENTO_MS);
+      vencimiento.unref();
+    });
+    const abandonado = () => intento.vencido || this.detenido;
+    const trabajo = async (): Promise<void> => {
       conexion = await this.opciones.conector(this.opciones.url);
+      // Si el plazo venció mientras esperaba, el catch de abajo ya cerró y reprogramó: este intento es viejo
+      if (abandonado()) return void (await conexion.cerrar().catch(() => undefined));
       const canal = await conexion.crearCanalConfirmacion();
       await canal.asegurarExchange(this.opciones.exchange);
-      if (this.detenido) {
+      if (abandonado()) {
         await canal.cerrar().catch(() => undefined);
         await conexion.cerrar().catch(() => undefined);
         return;
       }
       this.conexion = conexion;
       this.canal = canal;
-      const alCaer = (codigo: string) => this.alCaer(conexion, codigo);
-      conexion.alCerrar(alCaer);
+      const activa = conexion;
+      const alCaer = (codigo: string) => this.alCaer(activa, codigo);
+      activa.alCerrar(alCaer);
       canal.alCerrar(alCaer);
       canal.alDevolver((messageId) => {
         if (messageId !== undefined) this.devueltos.add(messageId);
@@ -228,9 +244,15 @@ export class PuenteAmqp {
         `RabbitMQ conectado (exchange ${this.opciones.exchange}, topic durable)`,
       );
       this.avisar(true);
+    };
+    try {
+      await Promise.race([trabajo(), tope]);
     } catch (error) {
+      intento.vencido = true;
       await conexion?.cerrar().catch(() => undefined);
       this.programarReconexion(codigoDe(error));
+    } finally {
+      clearTimeout(vencimiento);
     }
   }
 

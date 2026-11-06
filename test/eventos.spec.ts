@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { conLatido } from '../src/eventos/conector-amqplib';
 import { PuenteAmqp } from '../src/eventos/puente-amqp';
 import { BrokerFalso, esperarHasta, URL_BROKER } from './utils/amqp-falso';
 import { GatewayDePrueba, Servicios } from './utils/gateway';
@@ -607,5 +608,61 @@ describe('sin RABBITMQ_URL', () => {
     expect(gateway.baseEventos).toBeUndefined();
     expect((await gateway.pedir({ ruta: '/health' })).status).toBe(200);
     expect(await gateway.valorMetrica('gateway_events_broker_up')).toBeUndefined();
+  });
+});
+
+describe('intento de conexión colgado', () => {
+  const registro = { info: () => undefined, warn: () => undefined, debug: () => undefined };
+  const opciones = { url: URL_BROKER, exchange: 'vuelos.eventos', registro };
+
+  it('un conector que nunca resuelve vence el plazo y se reintenta hasta conectar', async () => {
+    const broker = new BrokerFalso();
+    let llamadas = 0;
+    const puente = new PuenteAmqp({
+      ...opciones,
+      conector: (url) => {
+        llamadas++;
+        return llamadas <= 2 ? new Promise(() => undefined) : broker.conector(url);
+      },
+      plazoIntentoMs: 30,
+      esperaInicialMs: 5,
+      esperaMaximaMs: 10,
+    });
+    puente.iniciar();
+    await esperarHasta(() => puente.conectado);
+    expect(llamadas).toBe(3);
+    await puente.cerrar();
+  });
+
+  it('si la conexión llega después del plazo, se cierra y no queda doble conexión', async () => {
+    const broker = new BrokerFalso();
+    let cerradas = 0;
+    let llamadas = 0;
+    const puente = new PuenteAmqp({
+      ...opciones,
+      conector: async (url) => {
+        llamadas++;
+        if (llamadas > 1) return broker.conector(url);
+        await new Promise((r) => setTimeout(r, 80));
+        const tarde = await broker.conector(url);
+        return { ...tarde, cerrar: async () => void cerradas++ };
+      },
+      plazoIntentoMs: 30,
+      esperaInicialMs: 5,
+      esperaMaximaMs: 10,
+    });
+    puente.iniciar();
+    await esperarHasta(() => puente.conectado);
+    await esperarHasta(() => cerradas === 1);
+    expect(puente.conectado).toBe(true);
+    expect(llamadas).toBe(2);
+    await puente.cerrar();
+  });
+});
+
+describe('latido del conector', () => {
+  it('añade heartbeat=15 sin tocar credenciales, y respeta uno ya puesto', () => {
+    expect(conLatido('amqp://u:p%40x@h:5672/')).toBe('amqp://u:p%40x@h:5672/?heartbeat=15');
+    expect(conLatido('amqp://u:p@h:5672/?heartbeat=5')).toBe('amqp://u:p@h:5672/?heartbeat=5');
   });
 });
