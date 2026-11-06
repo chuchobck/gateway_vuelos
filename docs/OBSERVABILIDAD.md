@@ -109,7 +109,7 @@ Cada servicio abre:
 | `http.request.method` | El método, de la lista conocida, o `_OTHER` |
 | `http.route` | La **plantilla**, o `__unmatched__` |
 | `http.response.status_code` | El status |
-| `quinde.upstream` | `core`, `bff`, `identity`, `notifier` o `payments` (la Payment API, a la que llama el core) |
+| `quinde.upstream` | `core`, `bff`, `identity`, `notifier`, `payments` (la Payment API, a la que llama el core) o `rabbitmq` (el span PRODUCER del puente de eventos del gateway) |
 | `quinde.auth.mode` | `publica` o `token` |
 | `quinde.request_id` | El X-Request-Id |
 | `quinde.correlation_id` | El X-Correlation-Id (sección 7). Solo en spans y logs, **nunca** como etiqueta de una métrica |
@@ -208,6 +208,15 @@ Con esto, una ruta inventada mil veces es **una** serie.
 | `gateway_rate_limited_total` | `policy`: `global`, `estricto` |
 | `gateway_auth_rejections_total` | `reason`: `missing_token`, `invalid_token`, `expired_token`, `insufficient_scope`, `jwks_unavailable` |
 | `gateway_upstream_errors_total` | `upstream`; `kind`: `unavailable` (502), `timeout` (504) |
+| `gateway_events_published_total` | (sin etiquetas) eventos confirmados por el broker (202) |
+| `gateway_events_rejected_total` | `reason`: lista cerrada (`missing_token`, `invalid_token`, `expired_token`, `insufficient_scope`, `jwks_unavailable`, `content_type`, `too_large`, `invalid_json`, `invalid_event`, `invalid_path`, `not_found`, `method_not_allowed`, `broker_unavailable`, `broker_timeout`, `broker_rejected`, `unroutable`, `internal_error`) |
+| `gateway_events_broker_up` | gauge 1/0: la conexión al broker. Solo informativo, ninguna ruta de salud depende de él |
+
+Las tres últimas filas existen solo con `RABBITMQ_URL` (puente de eventos HTTP → AMQP). Ninguna etiqueta
+lleva un `eventId`, un tipo de evento ni nada del cuerpo. El listener registra además
+`http_server_*` con la plantilla `/internal/v1/events`, un span SERVER (continúa el `traceparent` del
+core: el puerto es interno) y un span PRODUCER `PUBLISH <exchange>`, cuyo `traceparent` viaja en el
+mensaje (cabecera AMQP `traceparent`, junto con `x-correlation-id` y la propiedad `correlation_id`).
 
 Las específicas de cada servicio, como la bandeja del core o las entregas del notifier, llevan su
 prefijo (`core_`, `notifier_`...) y las mismas reglas de cardinalidad.

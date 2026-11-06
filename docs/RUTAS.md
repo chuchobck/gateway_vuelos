@@ -179,6 +179,50 @@ un cambio, la prueba falla a propósito.
   `Content-Length` mayor, 413 sin abrir el upstream. En trozos, el gateway corta al pasar el tope
   y también responde 413.
 
+## Listener de eventos (HTTP → AMQP)
+
+El gateway tiene un segundo listener, **interno**, con una sola ruta. Es la capa que traduce: el core
+(y cualquier servicio que publique) manda el evento por HTTP y el gateway lo deja en RabbitMQ, de donde
+lo consume el notifier. **El gateway traduce de protocolo y no decide nada de negocio**: no valida el
+`data`, no elige a quién va el evento y no conoce las suscripciones.
+
+| Qué | Valor |
+| --- | --- |
+| Puerto | `EVENTOS_PUERTO`, aparte de `PORT` y `METRICS_PORT`. El ingress no lo expone (como `/metrics`) |
+| Existe si | hay `RABBITMQ_URL`. Sin ella el listener no arranca y el gateway funciona igual |
+| Ruta | `POST /internal/v1/events`, la misma que el core ya usa contra el notifier: basta apuntar su `NOTIFIER_URL` a `http://<gateway>:<EVENTOS_PUERTO>` |
+| Token | de un cliente OAuth (`client_credentials`, con `client_id`) con el scope `events:publish`. El de una persona es 403 aunque traiga el scope |
+| Destino | exchange topic durable `EVENTOS_EXCHANGE` (por defecto `vuelos.eventos`), declarado al conectar |
+| Mensaje | el cuerpo recibido, **byte a byte**; routing key y `type` = `eventType`; `messageId` = `eventId`; persistente; `application/json`; `correlationId` y cabeceras `x-correlation-id` y `traceparent` |
+
+En el **puerto público**, `/internal/**` sigue siendo 404 (`RUTAS_BLOQUEADAS`), sin cambios.
+
+Del cuerpo solo se mira lo necesario para traducir: JSON bien formado (UTF-8, sin BOM) que sea un
+objeto, con `eventId` (texto de 1 a 255 caracteres, sin controles) y `eventType` (1 a 255 de
+`A-Z a-z 0-9 . _ : -`; es la routing key, sin comodines ni espacios). El orden de las comprobaciones
+es: ruta y método, token, tipo de contenido, tamaño y formato, publicación.
+
+| Status | Cuándo | Qué hace el core |
+| --- | --- | --- |
+| 202 | El broker **confirmó** la publicación (canal de confirmación, `mandatory`) | Publicado |
+| 400 | JSON mal formado, no es un objeto, o faltan `eventId` o `eventType` válidos; ruta ambigua | Fallido, sin reintento |
+| 401 | Sin token, o token inválido o vencido. `WWW-Authenticate: Bearer` | Pide un token nuevo |
+| 403 | Sin `events:publish`, o token de una persona | Fallido |
+| 404 / 405 | Otra ruta; otro método (`Allow: POST`) | Fallido |
+| 413 | Cuerpo de más de 100 kB | Fallido, sin reintento |
+| 415 | `Content-Type` que no es `application/json` (con `charset` solo utf-8) | Fallido, sin reintento |
+| 503 | Sin claves JWKS (`AUTH_UNAVAILABLE`), o el broker no confirmó en **5 s**, lo rechazó, está caído o ninguna cola recibió el mensaje. Lleva `Retry-After: 5` | Reintenta |
+
+Si el broker se cae, el gateway no se cae: responde 503 y se reconecta solo (backoff de 1 s a 30 s). Si
+vence el plazo de 5 s, el mensaje igual puede publicarse después; el reintento del core repite el
+`eventId` y el notifier lo trata como idempotente (200, o 409 si cambió un solo byte). Un mensaje que
+ninguna cola recibe (el notifier todavía no declaró la suya) se **rechaza** con 503 en lugar de darlo
+por publicado: así no se pierde en silencio.
+
+Los errores son ProblemDetails v1 (como los del resto de `/internal`), siempre con `X-Request-Id`,
+`X-Trace-Id` y `X-Correlation-Id`. El estado del broker no es parte de la salud del gateway: es el
+gauge `gateway_events_broker_up` ([OBSERVABILIDAD.md](OBSERVABILIDAD.md)).
+
 ## Normalización: qué es 400
 
 | Entrada | Resultado |

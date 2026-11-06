@@ -418,3 +418,48 @@ configuración que el resto de repos.
 | bff_vuelos | Volver a copiar `atributos.ts` y `trazas.ts`; propagar `X-Correlation-Id` al core en la metadata `x-correlation-id` |
 | Booking Prototipo | Base `https://<gateway>/api/v2`; token por `POST https://<gateway>/api/v2/oauth2/token` (`client_credentials`); mandar `X-Correlation-Id` (si no, el gateway lo genera y lo devuelve) |
 
+## Fase 4a: puente de eventos HTTP → AMQP
+
+### Qué se hizo
+
+- `src/eventos/`: un listener interno (`EVENTOS_PUERTO`) con `POST /internal/v1/events` que traduce el
+  evento del core a un mensaje AMQP en el exchange topic durable `vuelos.eventos`, y la conexión al
+  broker (canal de confirmación, reconexión con backoff). Detalle y tabla de respuestas en
+  [RUTAS.md](RUTAS.md#listener-de-eventos-http--amqp).
+- Variables `RABBITMQ_URL`, `EVENTOS_PUERTO` y `EVENTOS_EXCHANGE`; métricas y spans; pruebas con un
+  broker falso; cinco mutaciones.
+
+### Decisiones (tomadas sin consultar)
+
+1. **`mandatory` y `basic.return`**: un mensaje que ninguna cola recibe se rechaza con 503 en lugar de
+   darlo por publicado. Un topic exchange sin cola ligada lo descarta en silencio, aun con
+   confirmación, y el core lo daría por entregado. Lo más conservador: el core reintenta hasta que
+   el notifier declare su cola.
+2. **`eventType` es la routing key**: solo `A-Z a-z 0-9 . _ : -` (1 a 255). Sin `*` ni `#` ni espacios.
+   `eventId` es el `messageId`: 1 a 255 caracteres sin controles. Son los únicos campos que se miran.
+3. **UTF-8 estricto y sin BOM**: un cuerpo con bytes inválidos o con BOM es 400, porque los bytes se
+   publican tal cual y el notifier los parsearía igual.
+4. **El listener continúa el `traceparent` entrante** aunque `TRACE_TRUST_INCOMING` sea `false`: el puerto
+   es interno y quien llama es el core, así la traza del hecho llega hasta el notifier (fase 7c). El
+   puerto público no cambia.
+5. **Retry-After fijo de 5 s** para todo 503 del broker. El core usa su propio backoff.
+6. **`correlation_id` como propiedad AMQP y cabecera `x-correlation-id`**, además del `traceparent`
+   como cabecera: es lo que fija la sección 7 del estándar para AMQP.
+7. **Escucha en `HOST`** (por defecto 0.0.0.0), como `/metrics`: que no sea público depende del
+   ingress, no de la dirección. En local conviene `HOST=127.0.0.1`.
+8. **Respuesta 202 con `{"status":"ACCEPTED"}`**: el core descarta el cuerpo.
+9. **Sin límite de peticiones** en el listener: es interno y lo usa un solo servicio.
+
+### Qué no se pudo verificar
+
+- **Un RabbitMQ real**: las pruebas usan un broker falso. `conector-amqplib.ts`, el único archivo que
+  habla con amqplib, solo se compiló y se revisó contra sus tipos; el `basic.return` antes de la
+  confirmación y el `assertExchange` con otra definición (406) se supusieron de la documentación.
+- **El consumidor**: el notifier todavía no consume del bus ni declara la cola. Hasta entonces, con
+  el broker arriba, cada evento recibe 503 `unroutable`.
+
+### Pendientes
+
+- Fase 4b: el notifier consume de la cola ligada a `vuelos.eventos`; el core apunta `NOTIFIER_URL` al
+  listener del gateway.
+
