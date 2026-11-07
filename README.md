@@ -37,6 +37,10 @@ Booking (v2)     │ X-Correlation-Id · X-User-* solo partner   │──▶ /f
   - `X-Request-Id`, `nosniff` y HSTS en producción.
 - **Proxy**: en streaming, sin buffer ni recompresión. Plazo por upstream (502 caído, 504 lento) y
   sin reintentos.
+- **Eventos (HTTP → AMQP)**: con `RABBITMQ_URL`, un listener interno (`EVENTOS_PUERTO`) recibe
+  `POST /internal/v1/events` del core y lo publica, byte a byte, en el exchange `vuelos.eventos` de
+  RabbitMQ (202 solo con la confirmación del broker). Solo traduce de protocolo: no decide nada de
+  negocio ([`docs/RUTAS.md`](docs/RUTAS.md#listener-de-eventos-http--amqp)).
 - **Salud**: `/health`, `/health/ready` (no depende de los upstreams) y `/health/upstreams`
   (informativo).
 - **Observabilidad**:

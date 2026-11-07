@@ -15,6 +15,7 @@ import { Limitador } from './borde/limitador';
 import { MetricasBorde } from './borde/metricas-borde';
 import { CONTENT_TYPE_PROBLEMA, ErrorBorde, esRutaV2 } from './common/problema';
 import { Reloj } from './common/reloj';
+import { camposDeAcceso as camposAcceso } from './common/acceso';
 import { CABECERA_CORRELATION_ID, correlacionDe } from './common/correlation-id';
 import { CABECERA_REQUEST_ID, requestIdDe } from './common/request-id';
 import { Configuracion, NombreUpstream, UPSTREAMS } from './config/entorno';
@@ -26,6 +27,10 @@ import {
   instrumentarFastify,
   observar,
 } from './observabilidad/fastify';
+import { conectorAmqplib } from './eventos/conector-amqplib';
+import { MetricasEventos } from './eventos/metricas-eventos';
+import { PuenteAmqp } from './eventos/puente-amqp';
+import { ServidorEventos } from './eventos/servidor-eventos';
 import { Metricas } from './observabilidad/metricas';
 import { camposDeTraza, marcarError, traceparentDe, Trazas } from './observabilidad/trazas';
 import { ClienteUpstream, ErrorUpstream } from './proxy/cliente-upstream';
@@ -57,6 +62,11 @@ declare module 'fastify' {
   interface FastifyInstance {
     /** Trazas y métricas del gateway: main.ts arranca con ellas el servidor de /metrics. */
     observabilidad: { trazas: Trazas; metricas: Metricas };
+    /**
+     * El puente de eventos HTTP → AMQP (fase 4a): su listener interno y la conexión al broker.
+     * `null` sin RABBITMQ_URL. main.ts abre el puerto y arranca la conexión; construirApp no.
+     */
+    eventos: { servidor: ServidorEventos; puente: PuenteAmqp } | null;
   }
 }
 
@@ -72,6 +82,8 @@ export interface OpcionesApp {
   destinoLogs?: Writable;
   /** Solo pruebas: cada cuánto sale un lote de spans al recolector (ms). */
   esperaLoteMs?: number;
+  /** Solo pruebas: el puente de eventos con una conexión AMQP falsa (en lugar de amqplib). */
+  puenteEventos?: PuenteAmqp;
 }
 
 const NOT_FOUND = 'No route matches the request';
@@ -129,22 +141,14 @@ export function construirApp(opciones: OpcionesApp): FastifyInstance {
     ...(opciones.esperaLoteMs ? { esperaLoteMs: opciones.esperaLoteMs } : {}),
   });
   const metricas = new Metricas(observabilidad);
-  /** Los campos de §6.4 de la línea de acceso; `service` es el service.name de las trazas. */
   const camposDeAcceso = (
     correlationId: string | undefined,
     requestId: string,
     operacion: string | null,
     status: number,
     latenciaMs: number,
-  ) => ({
-    timestamp: new Date().toISOString(),
-    service: observabilidad.servicio,
-    correlation_id: correlationId ?? null,
-    request_id: requestId,
-    operation: operacion,
-    status,
-    latency_ms: Math.round(latenciaMs * 10) / 10,
-  });
+  ) =>
+    camposAcceso(observabilidad.servicio, correlationId, requestId, operacion, status, latenciaMs);
   const metricasBorde = new MetricasBorde(metricas);
 
   const app = Fastify({
@@ -204,6 +208,37 @@ export function construirApp(opciones: OpcionesApp): FastifyInstance {
   );
 
   app.decorate('observabilidad', { trazas, metricas });
+
+  // El puente de eventos: solo con RABBITMQ_URL. El gateway no depende de él: sin broker, el resto
+  // funciona igual (el estado del broker es solo el gauge gateway_events_broker_up)
+  let eventos: FastifyInstance['eventos'] = null;
+  if (configuracion.eventos) {
+    const metricasEventos = new MetricasEventos(metricas);
+    const puente =
+      opciones.puenteEventos ??
+      new PuenteAmqp({
+        url: configuracion.eventos.rabbitmqUrl,
+        exchange: configuracion.eventos.exchange,
+        conector: conectorAmqplib,
+        registro: logger,
+      });
+    puente.alCambiarEstado((conectado) => metricasEventos.broker.set(conectado ? 1 : 0));
+    const servidor = new ServidorEventos({
+      puente,
+      verificador,
+      trazas,
+      metricas,
+      metricasEventos,
+      registro: app.log,
+      servicio: observabilidad.servicio,
+    });
+    eventos = { servidor, puente };
+    app.addHook('onClose', async () => {
+      await servidor.cerrar();
+      await puente.cerrar();
+    });
+  }
+  app.decorate('eventos', eventos);
   // Antes que cualquier otro gancho: el span raíz queda activo para todos los que siguen
   instrumentarFastify(app, trazas, metricas);
 

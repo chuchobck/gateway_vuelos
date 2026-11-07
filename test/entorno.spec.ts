@@ -100,4 +100,54 @@ describe('entorno', () => {
     expect(leerEntorno({ ...BASE, TRUST_PROXY_HOPS: '1' }).saltosProxy).toBe(1);
     expect(errores({ ...BASE, TRUST_PROXY_HOPS: '11' })).toHaveLength(1);
   });
+
+  describe('puente de eventos (RABBITMQ_URL)', () => {
+    const URL_BROKER = 'amqp://quinde:clave-super-secreta@127.0.0.1:5672';
+
+    it('sin RABBITMQ_URL no hay puente y EVENTOS_* se ignoran', () => {
+      expect(leerEntorno(BASE).eventos).toBeUndefined();
+      expect(leerEntorno({ ...BASE, EVENTOS_PUERTO: '9470' }).eventos).toBeUndefined();
+    });
+
+    it('con RABBITMQ_URL y EVENTOS_PUERTO: el exchange vuelos.eventos por defecto', () => {
+      expect(
+        leerEntorno({ ...BASE, RABBITMQ_URL: URL_BROKER, EVENTOS_PUERTO: '9470' }).eventos,
+      ).toEqual({ rabbitmqUrl: URL_BROKER, puerto: 9470, exchange: 'vuelos.eventos' });
+      expect(
+        leerEntorno({
+          ...BASE,
+          RABBITMQ_URL: 'amqps://broker.interno:5671/quinde',
+          EVENTOS_PUERTO: '9470',
+          EVENTOS_EXCHANGE: 'otro.exchange',
+        }).eventos,
+      ).toMatchObject({ exchange: 'otro.exchange' });
+    });
+
+    it('EVENTOS_PUERTO es obligatoria con RABBITMQ_URL, y distinta de PORT y METRICS_PORT', () => {
+      expect(errores({ ...BASE, RABBITMQ_URL: URL_BROKER })).toEqual([
+        'EVENTOS_PUERTO es obligatoria con RABBITMQ_URL',
+      ]);
+      expect(errores({ ...BASE, RABBITMQ_URL: URL_BROKER, EVENTOS_PUERTO: '8080' })).toEqual([
+        'EVENTOS_PUERTO debe ser distinto de PORT y de METRICS_PORT',
+      ]);
+      expect(errores({ ...BASE, RABBITMQ_URL: URL_BROKER, EVENTOS_PUERTO: '9464' })).toEqual([
+        'EVENTOS_PUERTO debe ser distinto de PORT y de METRICS_PORT',
+      ]);
+      expect(errores({ ...BASE, RABBITMQ_URL: URL_BROKER, EVENTOS_PUERTO: '0' })).toHaveLength(1);
+    });
+
+    it('una URL que no es amqp(s) o un exchange raro no sirve, y el error no trae el valor', () => {
+      const lista = errores({
+        ...BASE,
+        RABBITMQ_URL: 'http://usuario:clave-super-secreta@127.0.0.1:5672',
+        EVENTOS_PUERTO: '9470',
+        EVENTOS_EXCHANGE: 'con espacio/clave-super-secreta',
+      });
+      expect(lista).toEqual([
+        'EVENTOS_EXCHANGE debe usar solo letras, dígitos, punto, guion y guion bajo',
+        'RABBITMQ_URL debe ser una URL amqp:// o amqps://',
+      ]);
+      expect(lista.join('\n')).not.toContain('clave-super-secreta');
+    });
+  });
 });

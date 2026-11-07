@@ -50,6 +50,9 @@ Un error de validación nombra la variable, nunca su valor, y el proceso sale co
 | `OTEL_TRACES_SAMPLER_ARG` | No | `1.0` en desarrollo, `0.1` en producción | `0.1` | Fracción de trazas raíz que se registran (0 a 1) |
 | `TRACE_TRUST_INCOMING` | No | `false` | `false` | `true` continúa el `traceparent` del cliente. Solo si delante hay un proxy de confianza que lo genera |
 | `METRICS_PORT` | No | `9464` | `9464` | Puerto APARTE de `GET /metrics` (Prometheus); 0 lo apaga. Tiene que ser distinto de `PORT` |
+| `RABBITMQ_URL` | No | (vacía: el listener de eventos no arranca) | `amqps://usuario:clave@rabbit.interno:5671` | Broker donde el gateway publica los eventos (puente HTTP → AMQP). Lleva credenciales: va en un secreto, nunca al repositorio ni a un log |
+| `EVENTOS_PUERTO` | Con `RABBITMQ_URL` | — | `8081` | Puerto INTERNO del listener `POST /internal/v1/events`. El ingress no lo expone. Distinto de `PORT` y `METRICS_PORT` |
+| `EVENTOS_EXCHANGE` | No | `vuelos.eventos` | `vuelos.eventos` | Exchange topic durable donde se publica (routing key = `eventType`); se declara al conectar |
 
 **Los límites son en memoria, por réplica.** Con N réplicas, un cliente tiene N veces el límite (y
 el balanceador puede repartirlo distinto). Cada servicio sigue teniendo su propio límite detrás,
@@ -85,6 +88,23 @@ adelantarse a ellos: el borde corta las ráfagas grandes y identity sigue decidi
 
 La fase G2 (contrato v2) no agrega variables: las rutas `/api/v2` y el `X-Correlation-Id` no se
 configuran.
+
+### Puente de eventos (HTTP → AMQP)
+
+Con `RABBITMQ_URL` el gateway abre un segundo listener, **interno**, en `EVENTOS_PUERTO`. Se despliega
+como `METRICS_PORT`: se declara como puerto adicional TCP del contenedor (`additionalPortMappings`, sin
+`external`) y solo lo alcanzan los servicios por la red interna. El core publica ahí con su
+`NOTIFIER_URL=http://gateway-vuelos:8081` (la ruta, `/internal/v1/events`, es la misma). Ver
+[RUTAS.md](RUTAS.md#listener-de-eventos-http--amqp).
+
+- El gateway **arranca sin broker** y no lo necesita para `/health`, `/health/ready` ni para enrutar:
+  mientras RabbitMQ no esté, el listener responde 503 con `Retry-After` y el core reintenta. El
+  estado se ve en `gateway_events_broker_up` (1 conectado, 0 no).
+- El cliente OAuth del core en identity (`core-vuelos`) necesita el scope `events:publish`
+  (`cliente:crear --permitir-eventos`), el mismo que ya usa contra el notifier.
+- El exchange `vuelos.eventos` (topic, durable) lo declara el gateway; la **cola** y su binding los
+  declara el consumidor (el notifier). Sin cola, el broker devuelve el mensaje y el gateway responde
+  503: nada se da por publicado sin que alguien lo reciba.
 
 ## 4. Lo que cambia en los otros servicios
 
@@ -129,6 +149,9 @@ La verificación completa, con los cinco servicios en local, está en [E2E-LOCAL
 | 504 en la primera petición del día | El core del plan gratuito estaba dormido más de `TIMEOUT_CORE_MS` |
 | No llegan trazas al recolector | `OTEL_EXPORTER_OTLP_ENDPOINT` es la base (`http://host:4318`), no `.../v1/traces`; el recolector tiene que aceptar OTLP/HTTP en JSON. Un envío que falla se descarta sin log por petición |
 | `/metrics` da 404 | Es lo esperado en el puerto público: las métricas están en `METRICS_PORT` |
+| El listener de eventos da 503 | El log dice `RabbitMQ no disponible (<código>)`: revisar `RABBITMQ_URL`, el usuario y el vhost. Con `ACCESS_REFUSED` son las credenciales; con `406` el exchange ya existe con otro tipo o sin `durable` |
+| El listener de eventos da 503 y el broker está arriba | `gateway_events_rejected_total{reason="unroutable"}`: ninguna cola está ligada al exchange. El consumidor (notifier) todavía no declaró la suya |
+| El core dice 401 al publicar | Su cliente OAuth no tiene `events:publish` (o su token es de una persona: da 403) |
 | El core ignora el `X-User-Id` de Booking | El token no es de partner (no trae `client_id`): el gateway borra las `X-User-*`. Booking tiene que usar el token de `client_credentials`, no el de una persona |
 | Una ruta de `/api/v2` da 404 en el borde | El contrato v2 vendored no la declara con ese método. `npm run rutas:listar` muestra lo que sí; si el core publicó un contrato nuevo, `npm run contrato:sync` |
 | `/api/v2/vuelos/webhooks` o `/eventos` dan 404 | Los sirve el notifier y su versión todavía no tiene las rutas v2 |

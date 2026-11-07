@@ -47,6 +47,18 @@ async function arrancar(): Promise<void> {
       metricas.listen(observabilidad.puertoMetricas, configuracion.host, () => listo());
     });
   }
+  // El listener interno de eventos (HTTP → AMQP): en su propio puerto, que el ingress no expone. La
+  // conexión al broker se abre sin esperarla: sin RabbitMQ el gateway arranca igual
+  if (app.eventos && configuracion.eventos) {
+    await app.eventos.servidor.escuchar(configuracion.eventos.puerto, configuracion.host);
+    app.eventos.puente.iniciar();
+    app.log.info(
+      `Eventos: POST /internal/v1/events en el puerto ${configuracion.eventos.puerto} → exchange ` +
+        `${configuracion.eventos.exchange} (RabbitMQ: conectando)`,
+    );
+  } else {
+    app.log.info('Eventos: sin RABBITMQ_URL, el listener de eventos no arranca');
+  }
   const destinos = Object.entries(configuracion.upstreams)
     .map(([nombre, { plazoMs }]) => `${nombre} (${plazoMs} ms)`)
     .join(', ');

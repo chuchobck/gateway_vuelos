@@ -16,6 +16,9 @@ observabilidad de los cinco servicios (fase 7a), en `docs/OBSERVABILIDAD.md`.
 
 - Solo el borde: rutas, normalización, token y scopes, CORS, límites, cabeceras y proxy. Nada que
   necesite estado de negocio.
+- **El gateway traduce HTTP a AMQP y no decide nada de negocio** (puente de eventos, fase 4a): recibe
+  el evento que el core publica por HTTP y lo deja en RabbitMQ. No valida el `data`, no decide a quién
+  va ni conoce las suscripciones: eso es del notifier, que consume del bus.
 - Los servicios siguen validando todo. El gateway nunca es la única barrera ni le pasa identidad a
   nadie: el `Authorization` se reenvía intacto y el gateway no escribe `X-User-*`. Las `X-User-*`
   del cliente (`X-User-Id`, `X-User-Roles`) solo pasan con un token VÁLIDO de partner (claim
@@ -39,6 +42,9 @@ observabilidad de los cinco servicios (fase 7a), en `docs/OBSERVABILIDAD.md`.
   - `contrato-core.ts`: los scopes salen del OpenAPI.
 - `src/seguridad/`: el verificador copiado del notifier (`claves-jwks.ts`,
   `verificador-jwks.ts`) y `autorizar.ts`.
+- `src/eventos/`: el puente HTTP → AMQP (`servidor-eventos.ts`: el listener interno;
+  `puente-amqp.ts`: la conexión, la confirmación y la reconexión; `conector-amqplib.ts`: lo único
+  que conoce amqplib; `metricas-eventos.ts`). Sin `RABBITMQ_URL` no existe.
 - `src/borde/`: IP real, limitador y CORS. `src/proxy/`: cabeceras y el cliente `node:http`.
   `src/salud/`.
 - `src/observabilidad/`: trazas (OpenTelemetry) y métricas (prom-client), pensado para copiarse a
@@ -56,6 +62,9 @@ observabilidad de los cinco servicios (fase 7a), en `docs/OBSERVABILIDAD.md`.
 - Ninguna regla reescribe la ruta: cada servicio conserva su prefijo. Única excepción, con
   `rutaUpstream`: `/api/v2/oauth2/token` → `/oauth2/token` de identity (el `tokenUrl` relativo del
   contrato v2). No se agrega otra sin anotarla aquí y en `docs/RUTAS.md`.
+- El listener de eventos (`EVENTOS_PUERTO`) tiene UNA ruta, `POST /internal/v1/events`, en un
+  puerto aparte que el ingress no expone (como `METRICS_PORT`). En el puerto público `/internal/**`
+  sigue siendo 404: no se toca esa regla de `tabla-rutas.ts`.
 - Se normaliza ANTES de decidir. Lo ambiguo se rechaza con 400, no se arregla. Se reenvía la ruta
   canónica que se decidió, nunca la cruda.
 - `/internal/**` y `/metrics` se evalúan antes que la tabla y responden igual que una ruta
@@ -72,6 +81,12 @@ observabilidad de los cinco servicios (fase 7a), en `docs/OBSERVABILIDAD.md`.
 - Verificador: RS256 fijo (nunca se lee del token), `typ` at+jwt, `iss` y `aud` texto a texto,
   `exp` con 30 s de tolerancia, y un `kid` desconocido con enfriamiento. Sin claves: 503
   `AUTH_UNAVAILABLE` con `Retry-After`, nunca 401 ni dejar pasar.
+- Eventos: solo un token de un cliente OAuth (`client_id`) con el scope `events:publish`; el de una
+  persona es 403 aunque traiga el scope. 202 solo con la confirmación del broker (canal de
+  confirmación, `mandatory`); sin ella en 5 s, o con el broker caído, 503 con `Retry-After`. El cuerpo
+  se publica EXACTO en bytes (el notifier compara la huella del sobre por `eventId`): nunca se
+  re-serializa. Ni el cuerpo, ni el `eventId`, ni la URL de `RABBITMQ_URL` (lleva credenciales) van
+  a un log, un span, una métrica o un error. El broker nunca es parte de la salud del gateway.
 - Ruta pública: el token no se mira. Si es inválido, igual pasa sin tocar y el servicio decide.
 - Errores del borde: ProblemDetails con la forma del contrato del core (sin campos extra) y siempre
   `X-Request-Id` y `X-Correlation-Id`. En `/api/v2/**`, el ProblemDetails v2 (`instance`,

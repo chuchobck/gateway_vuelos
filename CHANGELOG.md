@@ -3,6 +3,26 @@
 Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/); versiones con
 [SemVer](https://semver.org/lang/es/).
 
+## [Sin publicar] — fase 4a: puente de eventos HTTP → AMQP
+
+### Agregado
+
+- **Listener interno de eventos** (`EVENTOS_PUERTO`, sin ingress): `POST /internal/v1/events` recibe
+  el sobre que publica el core y lo deja, byte a byte, en el exchange topic durable `vuelos.eventos`
+  de RabbitMQ (routing key = `eventType`, `messageId` = `eventId`, persistente, con
+  `x-correlation-id` y `traceparent`). Exige un cliente OAuth con `events:publish`. 202 solo con la
+  confirmación del broker; 400/413/415 de formato; 503 con `Retry-After` si el broker no confirma en
+  5 s, está caído o ninguna cola recibe el mensaje. Se reconecta solo con backoff (1 a 30 s).
+- Variables: `RABBITMQ_URL` (sin ella el listener no arranca), `EVENTOS_PUERTO` y `EVENTOS_EXCHANGE`.
+- Métricas `gateway_events_published_total`, `gateway_events_rejected_total{reason}` y
+  `gateway_events_broker_up`; spans SERVER y PRODUCER.
+- Dependencia: `amqplib`.
+- Pruebas con un broker falso y cinco mutaciones nuevas.
+
+### Cambiado
+
+- `/internal/**` sigue siendo 404 en el puerto público; la regla no cambió.
+
 ## [Sin publicar] — fase G2: contrato v2 (RDA2)
 
 ### Agregado
