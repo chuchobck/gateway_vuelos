@@ -65,6 +65,9 @@ observabilidad de los cinco servicios (fase 7a), en `docs/OBSERVABILIDAD.md`.
 - El listener de eventos (`EVENTOS_PUERTO`) tiene UNA ruta, `POST /internal/v1/events`, en un
   puerto aparte que el ingress no expone (como `METRICS_PORT`). En el puerto público `/internal/**`
   sigue siendo 404: no se toca esa regla de `tabla-rutas.ts`.
+- Las rutas públicas del kiosko y de salidas (fase F1c) llevan `metodos` exactos y una `plantilla`
+  fija: con otro método no son públicas. Las de kiosko usan el límite estricto con el tope del core
+  (`limiteEstrictoMax`), y su `Authorization: Kiosk` (no es JWT) se reenvía intacta y nunca se registra.
 - Se normaliza ANTES de decidir. Lo ambiguo se rechaza con 400, no se arregla. Se reenvía la ruta
   canónica que se decidió, nunca la cruda.
 - `/internal/**` y `/metrics` se evalúan antes que la tabla y responden igual que una ruta

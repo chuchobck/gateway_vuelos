@@ -18,7 +18,10 @@ Booking (v2)     │ X-Correlation-Id · X-User-* solo partner   │──▶ /f
 
 - **Rutas**: una tabla declarativa, sin reescribir prefijos (salvo `/api/v2/oauth2/token` →
   `/oauth2/token`) ([`src/rutas/tabla-rutas.ts`](src/rutas/tabla-rutas.ts),
-  [`docs/RUTAS.md`](docs/RUTAS.md), `npm run rutas:listar`). Una ruta ambigua (`..`, `%2f`, `//`, doble codificación) es 400.
+  [`docs/RUTAS.md`](docs/RUTAS.md), `npm run rutas:listar`). Las rutas de kiosko y de salidas del core
+  (`/flights/v1/kiosk/**`, `/flights/v1/airports/{iataCode}/departures`) son públicas solo con sus
+  métodos exactos; las de kiosko llevan el límite estricto y su sesión `Authorization: Kiosk` pasa sin
+  mirarse. Una ruta ambigua (`..`, `%2f`, `//`, doble codificación) es 400.
   `/internal/**`, Swagger y el gRPC de los servicios no se exponen.
 - **Seguridad**: el verificador de la fase 4b/5a (RS256 fijo, `typ` at+jwt, `iss` y `aud` exactos,
   JWKS de identity). Hay rutas públicas, donde el `Authorization` pasa intacto y el servicio decide,

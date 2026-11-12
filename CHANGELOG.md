@@ -3,6 +3,19 @@
 Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/); versiones con
 [SemVer](https://semver.org/lang/es/).
 
+## [Sin publicar] — fase F1c: rutas de kiosko y salidas
+
+### Agregado
+
+- Públicas, con sus métodos exactos: `POST /flights/v1/kiosk/lookup`,
+  `POST /flights/v1/kiosk/bookings/{bookingId}/check-in`,
+  `GET /flights/v1/kiosk/bookings/{bookingId}/boarding-passes` y
+  `GET /flights/v1/airports/{iataCode}/departures`. Antes daban 401 (el contrato no las declara).
+- Las de kiosko con el límite estricto por ruta, topado al del core (10, 20 y 60 por minuto; el
+  menor entre ese tope y `RATE_LIMIT_STRICT_MAX`). El `Authorization: Kiosk <token>` pasa intacto.
+- `ReglaRuta`: `metodos`, `plantilla` y `limiteEstrictoMax`.
+- Pruebas (78) y tres mutaciones.
+
 ## [Sin publicar] — fase 4a: puente de eventos HTTP → AMQP
 
 ### Agregado

@@ -463,3 +463,31 @@ configuración que el resto de repos.
 - Fase 4b: el notifier consume de la cola ligada a `vuelos.eventos`; el core apunta `NOTIFIER_URL` al
   listener del gateway.
 
+## Fase F1c: rutas de kiosko y salidas
+
+### Qué se hizo
+
+- Cuatro rutas del core que el contrato v1 no declara pasan a ser públicas con sus métodos exactos
+  (tabla en [RUTAS.md](RUTAS.md)); las de kiosko con el límite estricto y su sesión `Authorization: Kiosk`.
+
+### Decisiones (tomadas sin consultar)
+
+1. **Un método distinto no es público**: la regla lleva `metodos` y, si no coincide, sigue la de
+   `/flights/v1/**` (token válido). HEAD no cuenta como GET: una regla pública no debe abrirse a un
+   método que nadie pidió.
+2. **Tope por regla en el estricto** (`limiteEstrictoMax`): el estricto existente es uno solo
+   (`RATE_LIMIT_STRICT_MAX`, 20) y dejaba lookup en 20 (más permisivo que el 10 del core). El límite
+   efectivo es el menor entre el tope de la regla y el configurado. Resultado por defecto: lookup 10,
+   check-in 20, pases 20 (más estricto que el 60 del core: el borde no sube lo del core). Quien quiera
+   los 60 de pases sube `RATE_LIMIT_STRICT_MAX` (también sube los de login y token: tiene que
+   decidirlo quien despliega).
+3. **Contador por plantilla, no por URL**: un `bookingId` distinto no reinicia el límite de check-in.
+4. **Las salidas no llevan límite estricto**: solo el global (lo pedido: "el límite normal").
+5. **La mayúscula no cambia la regla**: `/flights/v1/Kiosk/Lookup` se decide igual (se compara en
+   minúsculas, como todas las rutas) y el core, que es insensible, responde lo mismo.
+
+### Qué no se pudo verificar
+
+- **Contra el core real**: las pruebas usan un core falso. Los topes (10, 20 y 60) y la sesión
+  `Authorization: Kiosk` salen del encargo, no se leyeron del código del core.
+- **Una ruta de kiosko desde un navegador real** (solo el preflight y las cabeceras, con un cliente HTTP).
