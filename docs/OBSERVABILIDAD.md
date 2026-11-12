@@ -195,7 +195,10 @@ existe: el gateway lo bloquea como `/internal`.
 en todos los servicios, para poder sumarlas.
 
 **Regla de cardinalidad:**
-- `route` es **siempre** la plantilla (`/flights/v1/bookings/{bookingId}`) o `__unmatched__`.
+- `route` es **siempre** la plantilla (`/flights/v1/bookings/{bookingId}`) o `__unmatched__`. Las rutas
+  públicas del kiosko que el contrato no declara tienen su plantilla fija en la tabla del gateway
+  (`/flights/v1/kiosk/bookings/{bookingId}/check-in`): nunca el PNR, el `bookingId` ni el apellido.
+  La sesión de kiosko (`Authorization: Kiosk ...`) tampoco va a un span, una métrica ni un log.
 - `method` es de la lista conocida (GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS) o `_OTHER`.
 - `status` es el código. Nunca ids, IPs, correos ni rutas crudas.
 

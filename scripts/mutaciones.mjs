@@ -42,6 +42,7 @@ const ERRORES_V2 = 'test/errores-v2.spec.ts';
 const PUENTE = 'src/eventos/puente-amqp.ts';
 const SERVIDOR_EVENTOS = 'src/eventos/servidor-eventos.ts';
 const EVENTOS_PRUEBA = 'test/eventos.spec.ts';
+const KIOSKO_PRUEBA = 'test/kiosko-salidas.spec.ts';
 
 /**
  * nombre, cambios por archivo [{ archivo, cambios: [buscar, reemplazar] }], prueba y filtro (-t)
@@ -551,6 +552,56 @@ const MUTACIONES = [
     ],
     prueba: EVENTOS_PRUEBA,
     filtro: 'ninguna cola recibe el mensaje',
+  },
+
+  // --- rutas públicas de kiosko y salidas (fase F1c) -----------------------------------------
+  {
+    nombre: 'kiosko-cualquier-metodo: las rutas de kiosko son públicas con cualquier método',
+    archivos: [
+      {
+        archivo: RESOLVER,
+        cambios: [
+          [
+            'coincide(r.patron, ruta.clave) && (r.metodos === undefined || r.metodos.includes(metodo)),',
+            'coincide(r.patron, ruta.clave),',
+          ],
+        ],
+      },
+    ],
+    prueba: KIOSKO_PRUEBA,
+    filtro: 'NO es pública',
+  },
+  {
+    nombre: 'kiosko-tope: el estricto ignora el tope del core (lookup deja pasar más de 10)',
+    archivos: [
+      {
+        archivo: APP,
+        cambios: [
+          [
+            'if (tope === undefined || tope >= configuracion.limites.estricto) return limiteEstricto;',
+            'if (tope !== undefined || tope === undefined) return limiteEstricto;',
+          ],
+        ],
+      },
+    ],
+    prueba: KIOSKO_PRUEBA,
+    filtro: 'cortan con 429 en su tope',
+  },
+  {
+    nombre: 'kiosko-ruta-cruda: la plantilla de kiosko es la ruta pedida (con bookingId)',
+    archivos: [
+      {
+        archivo: RESOLVER,
+        cambios: [
+          [
+            'const plantilla = regla.plantilla ?? plantillaDePatron(regla.patron);',
+            'const plantilla = regla.plantilla ? ruta.ruta : plantillaDePatron(regla.patron);',
+          ],
+        ],
+      },
+    ],
+    prueba: KIOSKO_PRUEBA,
+    filtro: 'nada sensible',
   },
 ];
 const filtroNombre = process.argv[2];

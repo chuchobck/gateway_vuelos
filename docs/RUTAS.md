@@ -67,6 +67,10 @@ Contrato v2 del core: 2.0.0 (30 operaciones)
 | `/flights/v1/admin/**` | `*` | `core` | `token` | `flights:admin` |
 | `/flights/v1/health` | `*` | `core` | `publica` |  |
 | `/flights/v1/auth/**` | `*` | `core` | `publica` |  |
+| `/flights/v1/kiosk/lookup` | `POST` | `core` | `publica + límite estricto (tope 10/min)` |  |
+| `/flights/v1/kiosk/bookings/{bookingId}/check-in` | `POST` | `core` | `publica + límite estricto (tope 20/min)` |  |
+| `/flights/v1/kiosk/bookings/{bookingId}/boarding-passes` | `GET` | `core` | `publica + límite estricto (tope 60/min)` |  |
+| `/flights/v1/airports/{iataCode}/departures` | `GET` | `core` | `publica` |  |
 | `/flights/v1/search` | `POST` | `core` | `publica (contrato v1)` |  |
 | `/flights/v1/offers/{offerId}/seatmap` | `GET` | `core` | `publica (contrato v1)` |  |
 | `/flights/v1/offers/hold` | `POST` | `core` | `token (contrato v1)` | `flights:hold` |
@@ -157,6 +161,25 @@ un cambio, la prueba falla a propósito.
   `WEBHOOKS_MODE=notifier` responde 404.
 - **`/flights/v1/admin/**`**: el catálogo, `audit-log` y `bookings` de administración del core.
   Están fuera del contrato y el core exige `flights:admin`.
+- **Kiosko y salidas (`/flights/v1/kiosk/**`, `/flights/v1/airports/{iataCode}/departures`)**: las
+  agregó el core y el contrato v1 no las declara, así que sin regla pedirían token (401). Son
+  **públicas solo con sus métodos exactos** (`metodos` en la tabla: POST `kiosk/lookup`, POST
+  `kiosk/bookings/{bookingId}/check-in`, GET `kiosk/bookings/{bookingId}/boarding-passes`, GET
+  `airports/{iataCode}/departures`). Con otro método (HEAD incluido) o con una ruta parecida
+  (`/kioskx`, `/departures/extra`) la regla no coincide y sigue la de `/flights/v1/**`: token válido.
+  Las de `/flights/v1/admin/**` (embarque) no cambian.
+  - **Sesión de kiosko**: el core las protege con `Authorization: Kiosk <token>`, que NO es un JWT.
+    Al ser rutas públicas el gateway no la mira: la reenvía intacta y nunca la escribe en un log, un
+    span ni un error. Si es inválida, responde el core.
+  - **Límite**: las tres de kiosko llevan el **estricto** con contador **por ruta** y por IP (un
+    `bookingId` distinto no reinicia el de `check-in`). Cada una tiene un tope, el del core (lookup
+    10/min, check-in 20/min, pases 60/min), y el límite efectivo es el **menor** entre ese tope y
+    `RATE_LIMIT_STRICT_MAX` (20 por defecto): con los valores por defecto, 10, 20 y 20; el borde nunca
+    es más permisivo que el core. Las salidas llevan solo el límite global.
+  - **CORS**: `Authorization` y `Content-Type` están permitidas desde los orígenes de `CORS_ORIGINS`.
+  - **Nombre de ruta**: para spans, métricas y logs es la plantilla fija de la regla
+    (`/flights/v1/kiosk/bookings/{bookingId}/check-in`), nunca la URL pedida: ni PNR, ni
+    `bookingId`, ni apellidos.
 - **`/flights/v1/auth/**`**: es el login local del core. Con `AUTH_MODE=external` no existe y el
   core responde 404. Se deja pública para que un frontend sin migrar reciba ese 404 claro y no un
   401 del borde.

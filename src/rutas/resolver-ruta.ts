@@ -54,11 +54,15 @@ export class ResolverRutas {
       return { tipo: 'bloqueada' };
     }
 
-    const regla = this.tabla.find((r) => coincide(r.patron, ruta.clave));
+    // Una regla con `metodos` solo aplica a esos métodos exactos; con otro, sigue la siguiente regla
+    const regla = this.tabla.find(
+      (r) =>
+        coincide(r.patron, ruta.clave) && (r.metodos === undefined || r.metodos.includes(metodo)),
+    );
     if (regla === undefined) return { tipo: 'desconocida' };
 
     const { seguridad } = regla;
-    const plantilla = plantillaDePatron(regla.patron);
+    const plantilla = regla.plantilla ?? plantillaDePatron(regla.patron);
     if (seguridad.modo === 'publica') return { tipo: 'ruta', regla, seguridad, plantilla };
     if (seguridad.modo === 'token') {
       return {
