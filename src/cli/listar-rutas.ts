@@ -24,11 +24,13 @@ export function filasDeRutas(contratos: Contratos): Fila[] {
   }));
 
   for (const regla of TABLA_RUTAS) {
-    const extra = regla.limiteEstricto ? ' + límite estricto' : '';
+    const extra = regla.limiteEstricto
+      ? ` + límite estricto${regla.limiteEstrictoMax ? ` (tope ${regla.limiteEstrictoMax}/min)` : ''}`
+      : '';
     if (regla.seguridad.modo !== 'contrato') {
       filas.push({
-        ruta: regla.patron,
-        metodo: regla.destino === 'gateway' ? 'GET' : '*',
+        ruta: regla.plantilla ?? regla.patron,
+        metodo: regla.destino === 'gateway' ? 'GET' : (regla.metodos?.join(', ') ?? '*'),
         destino: regla.rutaUpstream ? `${regla.destino} → ${regla.rutaUpstream}` : regla.destino,
         seguridad: regla.seguridad.modo + extra,
         scopes: regla.seguridad.modo === 'token' ? regla.seguridad.scopes.join(' ') : '',

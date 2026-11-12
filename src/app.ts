@@ -123,6 +123,18 @@ export function construirApp(opciones: OpcionesApp): FastifyInstance {
     configuracion.limites.estricto,
     configuracion.limites.estrictoVentanaSegundos,
   );
+  // Una ruta con tope del core (`limiteEstrictoMax`) menor que el estricto configurado lleva su
+  // propio limitador: el borde nunca es más permisivo que el core. Uno por tope distinto.
+  const limitesEstrictosConTope = new Map<number, Limitador>();
+  const limitadorEstrictoDe = (tope: number | undefined): Limitador => {
+    if (tope === undefined || tope >= configuracion.limites.estricto) return limiteEstricto;
+    let limitador = limitesEstrictosConTope.get(tope);
+    if (limitador === undefined) {
+      limitador = new Limitador(reloj, tope, configuracion.limites.estrictoVentanaSegundos);
+      limitesEstrictosConTope.set(tope, limitador);
+    }
+    return limitador;
+  };
   const clientes = Object.fromEntries(
     UPSTREAMS.map((nombre) => [
       nombre,
@@ -385,7 +397,7 @@ export function construirApp(opciones: OpcionesApp): FastifyInstance {
     limitar(limiteGlobal, `g:${contexto.ip}`, contexto, metricasBorde, 'global');
     if (regla.limiteEstricto) {
       limitar(
-        limiteEstricto,
+        limitadorEstrictoDe(regla.limiteEstrictoMax),
         // Por ruta de destino: /oauth2/token y /api/v2/oauth2/token comparten el contador
         `e:${regla.rutaUpstream ?? regla.patron}:${contexto.ip}`,
         contexto,

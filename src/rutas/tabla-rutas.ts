@@ -28,11 +28,28 @@ export interface ReglaRuta {
    * (solo al final) cero o más segmentos.
    */
   patron: string;
+  /**
+   * Los métodos EXACTOS a los que aplica la regla (en mayúsculas; HEAD no cuenta como GET). Con otro
+   * método la regla no coincide y la petición sigue a la regla que viene después. Sin este campo,
+   * aplica a cualquiera.
+   */
+  metodos?: readonly string[];
   /** A quién va. `gateway`: lo responde el propio gateway (salud). */
   destino: NombreUpstream | 'gateway';
   seguridad: Seguridad;
   /** Además del global, un contador más estricto por IP y por ruta (fuerza bruta). */
   limiteEstricto?: boolean;
+  /**
+   * Con `limiteEstricto`, el tope del core para esa ruta, por IP y ventana: el límite efectivo es el
+   * menor entre este y RATE_LIMIT_STRICT_MAX, así que el borde nunca es más permisivo que el core.
+   */
+  limiteEstrictoMax?: number;
+  /**
+   * La plantilla con nombre para spans, métricas y logs, en lugar de la que sale del patrón (`*` →
+   * `{id}`): `/flights/v1/kiosk/bookings/{bookingId}/check-in`. Es siempre un texto fijo de la
+   * tabla, nunca la ruta pedida.
+   */
+  plantilla?: string;
   /** Tope del cuerpo en bytes: el del servicio de destino (más grande, 413 sin llegar a él). */
   cuerpoMaximo: number;
   /**
@@ -137,6 +154,52 @@ export const TABLA_RUTAS: readonly ReglaRuta[] = [
     seguridad: PUBLICA,
     cuerpoMaximo: CUERPO_100KB,
     nota: 'Login local del core: con AUTH_MODE=external no existe (404 del core)',
+  },
+
+  // --- kiosko y salidas: del core, fuera del contrato v1 (fase F1c) ---------------------------
+  // Públicas para el borde, con los métodos exactos. En el kiosko el core las protege con su propia
+  // sesión (`Authorization: Kiosk <token>`, que NO es un JWT): el gateway no la mira, la reenvía
+  // intacta y nunca la registra. El límite estricto cuenta por ruta, con el tope del core.
+  {
+    patron: '/flights/v1/kiosk/lookup',
+    metodos: ['POST'],
+    destino: 'core',
+    seguridad: PUBLICA,
+    limiteEstricto: true,
+    limiteEstrictoMax: 10,
+    cuerpoMaximo: CUERPO_100KB,
+    nota: 'Kiosko: busca la reserva por PNR y apellido y abre la sesión. Core: 10 por minuto',
+  },
+  {
+    patron: '/flights/v1/kiosk/bookings/*/check-in',
+    metodos: ['POST'],
+    plantilla: '/flights/v1/kiosk/bookings/{bookingId}/check-in',
+    destino: 'core',
+    seguridad: PUBLICA,
+    limiteEstricto: true,
+    limiteEstrictoMax: 20,
+    cuerpoMaximo: CUERPO_100KB,
+    nota: 'Kiosko: check-in con la sesión `Authorization: Kiosk <token>` (no es JWT). Core: 20 por minuto',
+  },
+  {
+    patron: '/flights/v1/kiosk/bookings/*/boarding-passes',
+    metodos: ['GET'],
+    plantilla: '/flights/v1/kiosk/bookings/{bookingId}/boarding-passes',
+    destino: 'core',
+    seguridad: PUBLICA,
+    limiteEstricto: true,
+    limiteEstrictoMax: 60,
+    cuerpoMaximo: CUERPO_100KB,
+    nota: 'Kiosko: pases de abordar con la sesión `Authorization: Kiosk <token>`. Core: 60 por minuto',
+  },
+  {
+    patron: '/flights/v1/airports/*/departures',
+    metodos: ['GET'],
+    plantilla: '/flights/v1/airports/{iataCode}/departures',
+    destino: 'core',
+    seguridad: PUBLICA,
+    cuerpoMaximo: CUERPO_100KB,
+    nota: 'Salidas de un aeropuerto: pública y de solo lectura (límite global)',
   },
   {
     patron: '/flights/v1/**',
